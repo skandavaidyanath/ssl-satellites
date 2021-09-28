@@ -35,6 +35,7 @@ import moco.loader
 import moco.optimizer
 
 import vits
+from fmow_dataloader import CustomDatasetFromImages
 
 
 torchvision_model_names = sorted(name for name in torchvision_models.__dict__
@@ -43,9 +44,10 @@ torchvision_model_names = sorted(name for name in torchvision_models.__dict__
 
 model_names = ['vit_small', 'vit_base', 'vit_conv_small', 'vit_conv_base'] + torchvision_model_names
 
-parser = argparse.ArgumentParser(description='MoCo ImageNet Pre-Training')
+parser = argparse.ArgumentParser(description='MoCo Pre-Training')
 parser.add_argument('data', metavar='DIR',
                     help='path to dataset')
+parser.add_argument('--dataset-name', type='str', help='Name of the dataset', default='imagenet', choices=['imagenet', 'fmow-rgb'])
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                     choices=model_names,
                     help='model architecture: ' +
@@ -254,8 +256,14 @@ def main_worker(gpu, ngpus_per_node, args):
     cudnn.benchmark = True
 
     # Data loading code
+    is_imagenet = (args.dataset_name == 'imagenet')
     traindir = os.path.join(args.data, 'train')
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+    if is_imagenet:
+        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225])
+    else:
+        if args.dataset_name == 'fmow_rgb':
+            normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
 
     # follow BYOL's augmentation recipe: https://arxiv.org/abs/2006.07733
@@ -283,11 +291,17 @@ def main_worker(gpu, ngpus_per_node, args):
         transforms.ToTensor(),
         normalize
     ]
-
-    train_dataset = datasets.ImageFolder(
-        traindir,
-        moco.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
+    
+    if is_imagenet:
+        train_dataset = datasets.ImageFolder(
+            traindir,
+            moco.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
                                       transforms.Compose(augmentation2)))
+    else:
+        # See /atlas/u/kayush/winter2020/jigsaw/moco_sat/moco_code/moco_main_fmow.py
+        train_dataset = CustomDatasetFromImages(traindir, 
+                                                moco.loader.TwoCropsTransform(transforms.Compose([transforms.Resize(224)]+augmentation1), 
+                                                transforms.Compose([transforms.Resize(224)]+augmentation2)))
 
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
