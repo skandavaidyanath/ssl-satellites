@@ -30,13 +30,14 @@ import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as torchvision_models
 from torch.utils.tensorboard import SummaryWriter
+from torchvision.transforms.transforms import RandomVerticalFlip
 
 import moco.builder
 import moco.loader
 import moco.optimizer
-
+from fmow_dataloader import fMoWMultibandDataset, fMoWRGBDataset, fMoWMultiDropBandsDataset
+import viewmaker_moco
 import vits
-from fmow_dataloader import fMoWSentinelDropBands
 
 # TODO: Add a downstream task so we can check our results
 
@@ -47,7 +48,9 @@ torchvision_model_names = sorted(name for name in torchvision_models.__dict__
 model_names = ['vit_small', 'vit_base', 'vit_conv_small', 'vit_conv_base'] + torchvision_model_names
 
 parser = argparse.ArgumentParser(description='MoCo Pre-Training')
-parser.add_argument('--dataset-name', type=str, help='Name of the dataset', default='fmow-sentinel-dropbands', choices=['fmow-rgb', 'fmow-sentinel', 'fmow-sentinel-dropbands'])
+parser.add_argument('data', metavar='DIR', help='path to dataset')
+parser.add_argument('--dataset-name', type=str, help='Name of the dataset', default='fmow-multi-dropbands', choices=['fmow-rgb', 'fmow-multi', 'fmow-multi-dropbands'])
+parser.add_argument('--viewmaker', '-vm', action='store_true', help='Using viewmaker or not')
 parser.add_argument('--num-bands', '-nb', type=int, default=3, help='Number of bands to keep in Sentinel drop bands dataset')
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                     choices=model_names,
@@ -60,7 +63,7 @@ parser.add_argument('--epochs', default=100, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-parser.add_argument('-b', '--batch-size', default=256, type=int,
+parser.add_argument('-b', '--batch-size', default=1024, type=int,
                     metavar='N',
                     help='mini-batch size (default: 4096), this is the total '
                          'batch size of all GPUs on the current node when '
@@ -80,7 +83,7 @@ parser.add_argument('--world-size', default=-1, type=int,
                     help='number of nodes for distributed training')
 parser.add_argument('--rank', default=-1, type=int,
                     help='node rank for distributed training')
-parser.add_argument('--dist-url', default='tcp://224.66.41.62:23456', type=str,    
+parser.add_argument('--dist-url', default='tcp://127.0.0.1:12345', type=str,    
                     help='url used to set up distributed training')        
 parser.add_argument('--dist-backend', default='nccl', type=str,
                     help='distributed backend')
@@ -124,6 +127,14 @@ parser.add_argument('--crop-min', default=0.08, type=float,
 def main():
     args = parser.parse_args()
 
+    ### TODO: need to check these things ####
+    if args.arch.startswith('vit'):
+        raise NotImplementedError
+    if not args.viewmaker:
+        raise NotImplementedError
+    if args.dataset_name == 'fmow-rgb' or args.dataset_name == 'fmow-multi':
+        raise NotImplementedError
+
     if args.seed is not None:
         random.seed(args.seed)
         torch.manual_seed(args.seed)
@@ -161,7 +172,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
     # suppress printing if not first GPU on each node
     if args.multiprocessing_distributed and (args.gpu != 0 or args.rank != 0):
-        def print_pass(*args):
+        def print_pass(*args, **kwargs):
             pass
         builtins.print = print_pass
 
@@ -178,22 +189,67 @@ def main_worker(gpu, ngpus_per_node, args):
         dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
                                 world_size=args.world_size, rank=args.rank)
         torch.distributed.barrier()
+
+    # create augmentations
+    if args.dataset_name == 'fmow-rgb':
+        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                    std=[0.229, 0.224, 0.225])
+    else:
+        channel_stats = pickle.load(open('./fmow-multiband-stats.pkl', 'rb'))
+        normalize = transforms.Normalize(mean=channel_stats['channel_means'],
+                                            std = channel_stats['channel_stds'])
+    """
+    # follow BYOL's augmentation recipe: https://arxiv.org/abs/2006.07733 
+    # But use only those usable for multiband images
+    # TODO: Need to change this
+    augmentation1 = [
+        transforms.Resize(224),         # See /atlas/u/kayush/winter2020/jigsaw/moco_sat/moco_code/moco_main_fmow.py
+        transforms.RandomResizedCrop(224, scale=(args.crop_min, 1.)),
+        transforms.RandomApply([
+            transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
+        ], p=0.8),                      # ColorJitter doesn't work on != 3 channels
+        transforms.RandomGrayscale(p=0.2),     # RandomGrayscale doesn't work on !=3 channels
+        transforms.RandomApply([moco.loader.GaussianBlur([.1, 2.])], p=1.0),     # need to check this
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        normalize
+    ]
+
+    augmentation2 = [
+        transforms.Resize(224),         # See /atlas/u/kayush/winter2020/jigsaw/moco_sat/moco_code/moco_main_fmow.py
+        transforms.RandomResizedCrop(224, scale=(args.crop_min, 1.)),
+        transforms.RandomApply([
+            transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
+        ], p=0.8),                      # ColorJitter doesn't work on != 3 channels
+        transforms.RandomGrayscale(p=0.2),   # RandomGrayscale doesn't work on !=3 channels
+        transforms.RandomApply([moco.loader.GaussianBlur([.1, 2.])], p=0.1),   # need to check this
+        transforms.RandomApply([moco.loader.Solarize()], p=0.2),               # and this
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        normalize
+    ]
+    """
+    
+    ## Some random yet possible augmentations for multiband images before passing into Viewmaker
+    augmentation = [
+        ### TODO: this 32 is tuned for the fmow-multiband dataset because median height = 40, median width = 51
+        transforms.Resize(32),
+        transforms.RandomResizedCrop(32, scale=(args.crop_min, 1.)),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomVerticalFlip(),
+        transforms.ToTensor(),
+        moco.loader.LogTransform(epsilon=1.),
+        normalize
+    ]
     # create model
-    if args.dataset_name=='fmow-sentinel-dropbands' and (args.num_bands > 13 or args.num_bands <= 0):
-        raise ValueError('Number of bands need to be within 1-13')
-    elif args.dataset_name == 'fmow-rgb':
-        args.num_bands = 3
-    elif args.dataset_name == 'fmow-sentinel':
-        args.num_bands = 13
+    # TODO: This is set for 13 band inputs! Need to change for 3 band inputs
     print("=> creating model '{}'".format(args.arch))
     if args.arch.startswith('vit'):
-        model = moco.builder.MoCo_ViT(
-            partial(vits.__dict__[args.arch], in_chans=3, stop_grad_conv1=args.stop_grad_conv1),
-            args.num_bands, args.moco_dim, args.moco_mlp_dim, args.moco_t)
+        model = viewmaker_moco.ViewmakerMoCo_ViT(
+            partial(vits.__dict__[args.arch], in_chans=13, stop_grad_conv1=args.stop_grad_conv1), num_bands=13, dim=args.moco_dim, mlp_dim=args.moco_mlp_dim, T=args.moco_t)
     else:
-        model = moco.builder.MoCo_ResNet(
-            partial(torchvision_models.__dict__[args.arch], zero_init_residual=True), 
-            args.num_bands, args.moco_dim, args.moco_mlp_dim, args.moco_t)
+        model = viewmaker_moco.ViewmakerMoCo_ResNet(
+            partial(torchvision_models.__dict__[args.arch], zero_init_residual=True), num_bands=13, dim=args.moco_dim, mlp_dim=args.moco_mlp_dim, T=args.moco_t)
 
     # infer learning rate before changing batch size
     args.lr = args.lr * args.batch_size / 256
@@ -264,48 +320,33 @@ def main_worker(gpu, ngpus_per_node, args):
 
     # Data loading code
     traindir = args.data
-    
-    if args.dataset_name == 'fmow-rgb':
-        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                    std=[0.229, 0.224, 0.225])
-    else:
-        channel_stats = pickle.load(open('./fmow-sentinel-stats.pkl', 'rb'))
-        normalize = transforms.Normalize(mean=channel_stats['channel_means'],
-                                            std = channel_stats['channel_stds'])
 
-    # follow BYOL's augmentation recipe: https://arxiv.org/abs/2006.07733
-    augmentation1 = [
-        transforms.Resize(224),         # See /atlas/u/kayush/winter2020/jigsaw/moco_sat/moco_code/moco_main_fmow.py
-        transforms.RandomResizedCrop(224, scale=(args.crop_min, 1.)),
-        transforms.RandomApply([
-            transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
-        ], p=0.8),                      # ColorJitter doesn't work on != 3 channels
-        transforms.RandomGrayscale(p=0.2),     # RandomGrayscale doesn't work on !=3 channels
-        transforms.RandomApply([moco.loader.GaussianBlur([.1, 2.])], p=1.0),     # need to check this
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        normalize
-    ]
-
-    augmentation2 = [
-        transforms.Resize(224),         # See /atlas/u/kayush/winter2020/jigsaw/moco_sat/moco_code/moco_main_fmow.py
-        transforms.RandomResizedCrop(224, scale=(args.crop_min, 1.)),
-        transforms.RandomApply([
-            transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
-        ], p=0.8),                      # ColorJitter doesn't work on != 3 channels
-        transforms.RandomGrayscale(p=0.2),   # RandomGrayscale doesn't work on !=3 channels
-        transforms.RandomApply([moco.loader.GaussianBlur([.1, 2.])], p=0.1),   # need to check this
-        transforms.RandomApply([moco.loader.Solarize()], p=0.2),               # and this
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        normalize
-    ]
-    
+    #train_dataset = datasets.ImageFolder(
+    #    traindir,
+    #    moco.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
+    #                                  transforms.Compose(augmentation2)))
         
-    train_dataset = fMoWSentinelDropBands(traindir, 
-                                            moco.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
-                                            transforms.Compose(augmentation2)))
-
+    if args.dataset_name == 'fmow-rgb':
+        if args.viewmaker:
+            train_dataset = fMoWRGBDataset(traindir, transforms.ToTensor())
+        else:
+            train_dataset = fMoWRGBDataset(traindir, moco.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
+                                      transforms.Compose(augmentation2)))
+            raise NotImplementedError
+    elif args.dataset_name == 'fmow-multi':
+        if args.viewmaker:
+            train_dataset = fMoWMultibandDataset(traindir, transforms.ToTensor())
+        else:
+            train_dataset = fMoWMultibandDataset(traindir, moco.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
+                                      transforms.Compose(augmentation2)))
+            raise NotImplementedError
+    elif args.dataset_name == 'fmow-multi-dropbands':
+        if args.viewmaker:
+            train_dataset = fMoWMultiDropBandsDataset(traindir, transforms=transforms.Compose(augmentation), num_bands=args.num_bands)
+        else:
+            train_dataset = fMoWMultiDropBandsDataset(traindir, transforms=moco.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
+                                      transforms.Compose(augmentation2)), num_bands=args.num_bands)
+            raise NotImplementedError
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
     else:
@@ -336,6 +377,10 @@ def main_worker(gpu, ngpus_per_node, args):
         summary_writer.close()
 
 def train(train_loader, model, optimizer, scaler, summary_writer, epoch, args):
+
+    ## This is set for using Viewmaker when the dataloader returns only one image per instance
+    ## TODO: Change for no Viewmaker case where it gets two images
+
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     learning_rates = AverageMeter('LR', ':.4e')
@@ -351,7 +396,7 @@ def train(train_loader, model, optimizer, scaler, summary_writer, epoch, args):
     end = time.time()
     iters_per_epoch = len(train_loader)
     moco_m = args.moco_m
-    for i, (images, _) in enumerate(train_loader):
+    for i, (image, _, _) in enumerate(train_loader):
         # measure data loading time
         data_time.update(time.time() - end)
 
@@ -362,14 +407,13 @@ def train(train_loader, model, optimizer, scaler, summary_writer, epoch, args):
             moco_m = adjust_moco_momentum(epoch + i / iters_per_epoch, args)
 
         if args.gpu is not None:
-            images[0] = images[0].cuda(args.gpu, non_blocking=True)
-            images[1] = images[1].cuda(args.gpu, non_blocking=True)
+            image = image.cuda(args.gpu, non_blocking=True)
 
         # compute output
         with torch.cuda.amp.autocast(True):
-            loss = model(images[0], images[1], moco_m)
+            loss = model(image, moco_m)
 
-        losses.update(loss.item(), images[0].size(0))
+        losses.update(loss.item(), image.size(0))
         if args.rank == 0:
             summary_writer.add_scalar("loss", loss.item(), epoch * iters_per_epoch + i)
 
@@ -456,5 +500,4 @@ if __name__ == '__main__':
 
 
 
-
-#python main_moco.py --dataset-name fmow-rgb --moco-m-cos --crop-min=.2 --multiprocessing-distributed --world-size 1 --rank 0 /atlas/u/buzkent/patchdrop/data/fMoW/train_62classes.csv
+#python trainer.py --dataset-name fmow-multi-dropbands -vm -p 1 --moco-m-cos --crop-min=.2 --multiprocessing-distributed --world-size 1 --rank 0 /atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/train.csv

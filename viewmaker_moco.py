@@ -6,27 +6,64 @@
 
 import torch
 import torch.nn as nn
+from torch.autograd import Function
+from torchvision import transforms
+
+from viewmaker import Viewmaker
+
+def default(val, def_val):
+    return def_val if val is None else val
+
+class gradreverse(Function):
+    @staticmethod
+    def forward(ctx, x):
+        return x
+        #return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output.neg()
+    
+class GradReverse(nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, x):
+        return gradreverse.apply(x)
 
 
-class MoCo(nn.Module):
+class ViewmakerMoCo(nn.Module):
     """
     Build a MoCo model with a base encoder, a momentum encoder, and two MLPs
     https://arxiv.org/abs/1911.05722
     """
-    def __init__(self, base_encoder, num_bands=3, dim=256, mlp_dim=4096, T=1.0):
+    def __init__(self, base_encoder, augment_fn=None, num_bands=3, dim=256, mlp_dim=4096, T=1.0):
         """
         num_bands: number of input bands. Used here for ResNet. Passed directly to VIT while creating the base encoder in main_moco.py (default: 3)
         dim: feature dimension (default: 256)
         mlp_dim: hidden dimension in MLPs (default: 4096)
         T: softmax temperature (default: 1.0)
         """
-        super(MoCo, self).__init__()
+        super(ViewmakerMoCo, self).__init__()
 
         self.T = T
 
         # build encoders
         self.base_encoder = base_encoder(num_classes=mlp_dim)
         self.momentum_encoder = base_encoder(num_classes=mlp_dim)
+        self.viewmaker = Viewmaker(num_channels=num_bands, clamp=True)
+        self.augment_fn = augment_fn
+
+        if self.augment_fn:
+            self.augments = nn.Sequential(
+                self.viewmaker,
+                GradReverse(),
+                self.augment_fn
+            )
+        else:
+            self.augments = nn.Sequential(
+                self.viewmaker,
+                GradReverse()
+            )
 
         self._build_projector_and_predictor_mlps(num_bands, dim, mlp_dim)
 
@@ -73,7 +110,7 @@ class MoCo(nn.Module):
         labels = (torch.arange(N, dtype=torch.long) + N * torch.distributed.get_rank()).cuda()
         return nn.CrossEntropyLoss()(logits, labels) * (2 * self.T)
 
-    def forward(self, x1, x2, m):
+    def forward(self, x, m):
         """
         Input:
             x1: first views of images
@@ -84,6 +121,8 @@ class MoCo(nn.Module):
         """
 
         # compute features
+        x1, x2 = self.augments(x), self.augments(x)
+
         q1 = self.predictor(self.base_encoder(x1))
         q2 = self.predictor(self.base_encoder(x2))
 
@@ -97,7 +136,7 @@ class MoCo(nn.Module):
         return self.contrastive_loss(q1, k2) + self.contrastive_loss(q2, k1)
 
 
-class MoCo_ResNet(MoCo):
+class ViewmakerMoCo_ResNet(ViewmakerMoCo):
     def _build_projector_and_predictor_mlps(self, num_bands, dim, mlp_dim):
         hidden_dim = self.base_encoder.fc.weight.shape[1]
         del self.base_encoder.fc, self.momentum_encoder.fc # remove original fc layer
@@ -115,8 +154,11 @@ class MoCo_ResNet(MoCo):
         self.predictor = self._build_mlp(2, dim, mlp_dim, dim, False)
 
 
-class MoCo_ViT(MoCo):
+class ViewmakerMoCo_ViT(ViewmakerMoCo):
     def _build_projector_and_predictor_mlps(self, num_bands, dim, mlp_dim):
+
+        # TODO: Might need to change some stuff here as well like in Resnet
+
         hidden_dim = self.base_encoder.head.weight.shape[1]
         del self.base_encoder.head, self.momentum_encoder.head # remove original fc layer
 

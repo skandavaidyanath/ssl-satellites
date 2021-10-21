@@ -6,6 +6,7 @@
 
 from PIL import Image, ImageFilter, ImageOps
 import math
+import torch
 import random
 import torchvision.transforms.functional as tf
 
@@ -40,3 +41,14 @@ class Solarize(object):
 
     def __call__(self, x):
         return ImageOps.solarize(x)
+
+
+class LogTransform(object):
+    """
+        Return the log of the image
+    """
+    def __init__(self, epsilon=1.0):
+        self.epsilon = epsilon
+
+    def __call__(self, x):
+        return torch.log(x+self.epsilon)
