@@ -36,7 +36,7 @@ class ViewmakerMoCo(nn.Module):
     Build a MoCo model with a base encoder, a momentum encoder, and two MLPs
     https://arxiv.org/abs/1911.05722
     """
-    def __init__(self, base_encoder, augment_fn=None, num_bands=3, dim=256, mlp_dim=4096, T=1.0):
+    def __init__(self, base_encoder, augment_fn=None, num_bands=13, dim=256, mlp_dim=4096, T=1.0):
         """
         num_bands: number of input bands. Used here for ResNet. Passed directly to VIT while creating the base encoder in main_moco.py (default: 3)
         dim: feature dimension (default: 256)
@@ -156,9 +156,6 @@ class ViewmakerMoCo_ResNet(ViewmakerMoCo):
 
 class ViewmakerMoCo_ViT(ViewmakerMoCo):
     def _build_projector_and_predictor_mlps(self, num_bands, dim, mlp_dim):
-
-        # TODO: Might need to change some stuff here as well like in Resnet
-
         hidden_dim = self.base_encoder.head.weight.shape[1]
         del self.base_encoder.head, self.momentum_encoder.head # remove original fc layer
 

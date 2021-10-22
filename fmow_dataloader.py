@@ -73,12 +73,9 @@ class fMoWMultibandDataset(Dataset):
         self.data_len = len(self.indices)
         self.transforms = transforms
         self.resize = resize
-
-        if not os.path.isfile('./fmow-multiband-stats.pkl'):
-            raise OSError("Missing stats file for fMoW Multiband")
         
     def __len__(self):
-        return len(self.data_len)
+        return self.data_len
     
     def open_image(self, img_path):
         with rasterio.open(img_path) as data:
@@ -97,73 +94,11 @@ class fMoWMultibandDataset(Dataset):
         image = torch.FloatTensor(self.open_image(image_path))
         label = selection['category']
         if self.transforms:
-            # note that image might be a list of 2 images if TwoCropTranform is used
-            image = self.transforms(image)
+            # note that images is a list of 2 images since TwoCropTranform is used
+            images = self.transforms(image)
             
-        return (image, image_path, label)
+        return (images, image_path, label)
 
-
-class fMoWMultiDropBandsDataset(Dataset):
-    '''fMoW Multibands Drop Bands Dataset'''
-    def __init__(self, 
-                 csv_path, 
-                 transforms=None,
-                 num_bands=13, 
-                 resize=64):
-        """ Initialize the dataset.
-        
-        Args:
-            csv_file (string): Path to the csv file with annotations. (Works for /atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/train.csv fmow-sentinel)
-            transform (callable, optional): Optional transform to be applied
-                on tensor images.
-            num_bands (int): Number of bands/channels to keep
-            resize: Size to load images as
-        """
-        self.data_info = pd.read_csv(csv_path)
-        self.indices = self.data_info.index.unique().to_numpy()
-        self.data_len = len(self.indices)
-        self.transforms = transforms
-        self.num_bands = num_bands
-        self.resize = resize
-
-        if not os.path.isfile('./fmow-multiband-stats.pkl'):
-            raise OSError("Missing stats file for fMoW Multiband")
-        
-    def __len__(self):
-        return len(self.data_len)
-    
-    def open_image(self, img_path):
-        with rasterio.open(img_path) as data:
-            #img = data.read(
-            #    out_shape=(data.count, self.resize, self.resize),
-            #    resampling=Resampling.bilinear
-            #)
-            img = data.read()
-        return img
-            
-    def __getitem__(self, idx):
-        index = self.indices[idx]
-        selection = self.data_info.loc[index]
-
-        image_path = selection["image_path"]
-        image = self.open_image(image_path)
-        image = torch.FloatTensor(image)
-        if self.transforms:
-            # note that image might be a list of 2 images if TwoCropTranform is used
-            image = self.transforms(image)
-        # Drop bands
-        if not isinstance(image, list):
-            chosen_bands = np.random.choice([*range(image.shape[0])], self.num_bands, replace=False)
-            band_mask = np.array([np.ones(image.shape[1:]) if i in chosen_bands else np.zeros(image.shape[1:]) for i in range(image.shape[0])])
-            masked_image = image * band_mask
-        else:
-            raise NotImplementedError
-
-        assert masked_image.shape == image.shape
-        
-        label = selection['category']
-
-        return (masked_image, image_path, label)
 
 
 if __name__ == '__main__':
@@ -172,10 +107,6 @@ if __name__ == '__main__':
     d1 = fMoWMultibandDataset('/atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/train.csv')
     print(d1[0][0].shape, d1[0][1], d1[0][2])
     print(d1[0][0].sum())
-
-    d2 = fMoWMultiDropBandsDataset('/atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/train.csv', num_bands=5)
-    print(d2[0][0].shape, d2[0][1], d2[0][2])
-    print(d2[0][0].sum())
     """
     
     # Calculate the channel stats
