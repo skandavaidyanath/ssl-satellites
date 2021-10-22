@@ -194,4 +194,3 @@ This project is under the CC-BY-NC 4.0 license. See [LICENSE](LICENSE) for detai
   journal = {arXiv preprint arXiv:2104.02057},
   year    = {2021},
 }
-```
