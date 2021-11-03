@@ -7,6 +7,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
+import numpy as np
 import builtins
 import math
 import os
@@ -50,7 +51,8 @@ model_names = ['vit_small', 'vit_base', 'vit_conv_small', 'vit_conv_base'] + tor
 
 parser = argparse.ArgumentParser(description='MoCo Pre-Training')
 parser.add_argument('data', metavar='DIR', help='path to dataset')
-parser.add_argument('--dataset-name', type=str, help='Name of the dataset', default='fmow-multi-dropbands', choices=['fmow-rgb', 'fmow-multi', 'fmow-multi-dropbands'])
+parser.add_argument('--dataset-name', type=str, help='Name of the dataset', default='fmow-multi', choices=['fmow-rgb', 'fmow-multi'])
+parser.add_argument('--dont-drop-bands', '-ddb', action='store_true')
 parser.add_argument('--viewmaker', '-vm', action='store_true', help='Using viewmaker or not')
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                     choices=model_names,
@@ -63,7 +65,7 @@ parser.add_argument('--epochs', default=100, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-parser.add_argument('-b', '--batch-size', default=4096, type=int,
+parser.add_argument('-b', '--batch-size', default=512, type=int,
                     metavar='N',
                     help='mini-batch size (default: 4096), this is the total '
                          'batch size of all GPUs on the current node when '
@@ -118,7 +120,7 @@ parser.add_argument('--stop-grad-conv1', action='store_true',
 parser.add_argument('--optimizer', default='adamw', type=str,
                     choices=['lars', 'adamw'],
                     help='optimizer used (default: lars)')
-parser.add_argument('--warmup-epochs', default=10, type=int, metavar='N',
+parser.add_argument('--warmup-epochs', default=0, type=int, metavar='N',
                     help='number of warmup epochs')
 parser.add_argument('--crop-min', default=0.08, type=float,
                     help='minimum scale for random cropping (default: 0.08)')
@@ -131,11 +133,12 @@ def main():
         raise NotImplementedError
     if args.viewmaker:
         raise NotImplementedError
-    if args.dataset_name == 'fmow-rgb' or args.dataset_name == 'fmow-multi':
+    if args.dataset_name == 'fmow-rgb':
         raise NotImplementedError
 
     if args.seed is not None:
         random.seed(args.seed)
+        np.random.seed(args.seed)
         torch.manual_seed(args.seed)
         cudnn.deterministic = True
         warnings.warn('You have chosen to seed training. '
@@ -232,6 +235,10 @@ def main_worker(gpu, ngpus_per_node, args):
         moco.loader.RandomDropBands()  ## this is new we added
     ]
     
+    if args.dont_drop_bands:
+        augmentation1 = augmentation1[:-1]
+        augmentation2 = augmentation2[:-1]
+    
     # create model
     # TODO: This is set for 13 band inputs! Need to change for 3 band inputs
     print("=> creating model '{}'".format(args.arch))
@@ -246,10 +253,16 @@ def main_worker(gpu, ngpus_per_node, args):
     args.base_lr = args.lr   ## for logging purposes
     args.lr = args.lr * args.batch_size / 256
     
-    if not os.path.exists(f'checkpoints/moco_lr={args.base_lr}_{args.optimizer}/'):
-        os.makedirs(f'checkpoints/moco_lr={args.base_lr}_{args.optimizer}/')
-    if not os.path.exists(f'runs/moco_lr={args.base_lr}_{args.optimizer}/'):
-        os.makedirs(f'runs/moco_lr={args.base_lr}_{args.optimizer}/')
+    ## Set up some housekeeping
+    logfile = f'moco_{args.arch}_lr={args.base_lr}_{args.optimizer}_warmup={args.warmup_epochs}_bs={args.batch_size}'
+    if args.dont_drop_bands:
+        logfile += f'_ddb'
+    if args.viewmaker:
+        logfile += f'_vm'
+    if not os.path.exists(f'checkpoints/{logfile}/'):
+        os.makedirs(f'checkpoints/{logfile}/')
+    if not os.path.exists(f'runs/{logfile}'):
+        os.makedirs(f'runs/{logfile}/')
 
     if not torch.cuda.is_available():
         print('using CPU, this will be slow')
@@ -292,10 +305,10 @@ def main_worker(gpu, ngpus_per_node, args):
                                 weight_decay=args.weight_decay)
         
     scaler = torch.cuda.amp.GradScaler()
-    summary_writer = SummaryWriter(log_dir=f'runs/moco_lr={args.base_lr}_{args.optimizer}/') if args.rank == 0 else None
+    summary_writer = SummaryWriter(log_dir=f'runs/{logfile}/') if args.rank == 0 else None
     if args.rank == 0:
         wandb.init(
-            name=f'lr={args.base_lr}_{args.optimizer}',
+            name=logfile,
             project='moco-v3',
             config=vars(args),
             entity='ssl-satellites')
@@ -329,10 +342,6 @@ def main_worker(gpu, ngpus_per_node, args):
                                       transforms.Compose(augmentation2)))
         raise NotImplementedError
     elif args.dataset_name == 'fmow-multi':
-        train_dataset = fMoWMultibandDataset(traindir, moco.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
-                                      transforms.Compose(augmentation2)))
-        raise NotImplementedError
-    elif args.dataset_name == 'fmow-multi-dropbands':
         train_dataset = fMoWMultibandDataset(traindir, transforms=moco.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
                                   transforms.Compose(augmentation2)))
     
@@ -360,7 +369,7 @@ def main_worker(gpu, ngpus_per_node, args):
                 'state_dict': model.state_dict(),
                 'optimizer' : optimizer.state_dict(),
                 'scaler': scaler.state_dict(),
-            }, is_best=False, filename=f'checkpoints/moco_lr={args.base_lr}_{args.optimizer}/checkpoint_%04d.pth.tar' % epoch)
+            }, is_best=False, filename=f'checkpoints/{logfile}/checkpoint_%04d.pth.tar' % epoch)
 
     if args.rank == 0:
         summary_writer.close()
@@ -398,9 +407,9 @@ def train(train_loader, model, optimizer, scaler, summary_writer, epoch, args):
             images[0] = images[0].cuda(args.gpu, non_blocking=True)
             images[1] = images[1].cuda(args.gpu, non_blocking=True)
             
-        ## Setup for using Autocast (doing this in DropBands now)
-        #images[0] = images[0].half()
-        #images[1] = images[1].half()
+        ## Setup for using Autocast 
+        images[0] = images[0].half()
+        images[1] = images[1].half()
 
         # compute output
         with torch.cuda.amp.autocast(True):
@@ -494,4 +503,4 @@ if __name__ == '__main__':
 
 
 
-#python trainer.py --dataset-name fmow-multi-dropbands -p 10 --moco-m-cos --crop-min=.2 --multiprocessing-distributed --world-size 1 --rank 0 /atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/train.csv
+#python main_moco.py --dataset-name fmow-multi -p 10 --moco-m-cos --crop-min=.2 --multiprocessing-distributed --world-size 1 --rank 0 /atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/train.csv
