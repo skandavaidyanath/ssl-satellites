@@ -16,6 +16,7 @@ import time
 import warnings
 import pickle
 import wandb
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -50,7 +51,7 @@ parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                     help='model architecture: ' +
                         ' | '.join(model_names) +
                         ' (default: resnet50)')
-parser.add_argument('-j', '--workers', default=32, type=int, metavar='N',
+parser.add_argument('-j', '--workers', default=16, type=int, metavar='N',
                     help='number of data loading workers (default: 32)')
 parser.add_argument('--epochs', default=90, type=int, metavar='N',
                     help='number of total epochs to run')
@@ -63,8 +64,7 @@ parser.add_argument('-b', '--batch-size', default=1024, type=int,
                          'using Data Parallel or Distributed Data Parallel')
 parser.add_argument('--lr', '--learning-rate', default=1e-3, type=float,
                     metavar='LR', help='initial (base) learning rate', dest='lr')
-parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
-                    help='momentum')
+# parser.add_argument('--momentum', default=0.9, type=float, metavar='M', help='momentum')  ## not using this because we're switching from SGD to Adam
 parser.add_argument('--wd', '--weight-decay', default=0., type=float,
                     metavar='W', help='weight decay (default: 0.)',
                     dest='weight_decay')
@@ -97,6 +97,9 @@ parser.add_argument('--pretrained', default='', type=str,
                     help='path to moco pretrained checkpoint')
 parser.add_argument('--pretrained_id', default='', type=str,
                     help='an id for the pretrained model you loaded useful for logging')
+parser.add_argument('--eval_model', default='', type=str, help='path to eval model')
+parser.add_argument('--fully-supervised', '-fs', action='store_true',
+                    help='train a fully supervised model from scratch')
 
 best_acc1 = 0
 
@@ -104,10 +107,20 @@ best_acc1 = 0
 def main():
     args = parser.parse_args()
     
+    if args.pretrained and args.fully_supervised:
+        raise ValueError("Cannot specify both fully supervised and pretrained to be true")
+    
     if args.arch.startswith('vit'):
         raise NotImplementedError
     if args.dataset_name == 'fmow-rgb':
         raise NotImplementedError
+        
+    if args.evaluate and args.eval_model:
+        SEED = 1
+        np.random.seed(SEED)
+        random.seed(SEED)
+        torch.manual_seed(SEED)
+        
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -189,12 +202,33 @@ def main_worker(gpu, ngpus_per_node, args):
         model.conv1 = nn.Conv2d(num_bands, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
         linear_keyword = 'fc'
     
-    for name, param in model.named_parameters():
-        if name not in ['%s.weight' % linear_keyword, '%s.bias' % linear_keyword]:
-            param.requires_grad = False
-    # init the fc layer
-    getattr(model, linear_keyword).weight.data.normal_(mean=0.0, std=0.01)
-    getattr(model, linear_keyword).bias.data.zero_()
+    if not args.fully_supervised:
+        ## this will happen for eval models also but thats fine
+        for name, param in model.named_parameters():
+            if name not in ['%s.weight' % linear_keyword, '%s.bias' % linear_keyword]:
+                param.requires_grad = False
+        # init the fc layer
+        getattr(model, linear_keyword).weight.data.normal_(mean=0.0, std=0.01)
+        getattr(model, linear_keyword).bias.data.zero_()
+        
+    if args.evaluate and args.eval_model:
+        if os.path.isfile(args.eval_model):
+            print("=> loading checkpoint '{}'".format(args.eval_model))
+            checkpoint = torch.load(args.eval_model, map_location="cpu")
+
+            # rename moco pre-trained keys
+            state_dict = checkpoint['state_dict']
+            for k in list(state_dict.keys()):
+                if k.startswith('module.'):
+                    # remove prefix
+                    state_dict[k[len("module."):]] = state_dict[k]
+                    del state_dict[k]
+
+            model.load_state_dict(state_dict)
+            print("=> loaded eval model '{}'".format(args.eval_model))
+        else:
+            print("=> no checkpoint found at '{}'".format(args.eval_model))
+        
 
     # load from pre-trained, before DistributedDataParallel constructor
     if args.pretrained:
@@ -259,10 +293,14 @@ def main_worker(gpu, ngpus_per_node, args):
 
     # optimize only the linear classifier
     parameters = list(filter(lambda p: p.requires_grad, model.parameters()))
-    assert len(parameters) == 2  # weight, bias
+    if not args.fully_supervised:
+        ## this also includes the eval case but thats fine
+        assert len(parameters) == 2  # weight, bias
 
-    optimizer = torch.optim.SGD(parameters, init_lr,
-                                momentum=args.momentum,
+    #optimizer = torch.optim.SGD(parameters, init_lr,
+    #                            momentum=args.momentum,
+    #                            weight_decay=args.weight_decay)
+    optimizer = torch.optim.Adam(parameters, init_lr,
                                 weight_decay=args.weight_decay)
 
     # optionally resume from a checkpoint
@@ -334,6 +372,10 @@ def main_worker(gpu, ngpus_per_node, args):
 
     val_loader = torch.utils.data.DataLoader(
         val_dataset, batch_size=256, shuffle=False, num_workers=args.workers, pin_memory=True)
+
+    if args.evaluate:
+        validate(val_loader, model, criterion, args)
+        return
     
     ## Set up some housekeeping
     logfile = f'mocolincls_lr={args.lr}_bs={args.batch_size}'
@@ -341,21 +383,19 @@ def main_worker(gpu, ngpus_per_node, args):
         logfile += '_ddb'
     if args.pretrained:
         logfile += f'_pt={args.pretrained_id}'
+    if args.fully_supervised:
+        logfile += f'_fs'
     if not os.path.exists(f'checkpoints/{logfile}/'):
         os.makedirs(f'checkpoints/{logfile}/')
     if not os.path.exists(f'runs/{logfile}'):
         os.makedirs(f'runs/{logfile}/')
         
-    if args.rank == 0:
+    if not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank == 0):
         wandb.init(
             name=logfile,
             project='moco-v3',
             config=vars(args),
             entity='ssl-satellites')
-
-    if args.evaluate:
-        validate(val_loader, model, criterion, args)
-        return
 
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
@@ -381,7 +421,7 @@ def main_worker(gpu, ngpus_per_node, args):
                 'best_acc1': best_acc1,
                 'optimizer' : optimizer.state_dict(),
             }, is_best, filename=f'checkpoints/{logfile}/checkpoint_%04d.pth.tar' % epoch)
-            if epoch == args.start_epoch:
+            if args.pretrained and epoch == args.start_epoch and not args.fully_supervised:
                 sanity_check(model.state_dict(), args.pretrained, linear_keyword)
             wandb.log({"training/loss": loss, "training/acc1": train_acc1, "training/acc5": train_acc5, "val/acc1": acc1, "val/acc5": acc5})
 
@@ -418,6 +458,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
 
         # compute output
         output = model(images)
+        
         loss = criterion(output, target)
 
         # measure accuracy and record loss
@@ -471,6 +512,10 @@ def validate(val_loader, model, criterion, args):
             losses.update(loss.item(), images.size(0))
             top1.update(acc1[0], images.size(0))
             top5.update(acc5[0], images.size(0))
+            
+            ## per class accuracy
+            per_class_acc = accuracy(output, target)
+            TODO NEED A PROGRESS METER THING HERE
 
             # measure elapsed time
             batch_time.update(time.time() - end)
@@ -579,12 +624,31 @@ def accuracy(output, target, topk=(1,)):
             correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
+    
+    
+def per_class_accuracy(outputs, classes):
+    nb_classes = 62
+    confusion_matrix = torch.zeros(nb_classes, nb_classes)
+    with torch.no_grad():
+        _, preds = torch.max(outputs, 1)
+        for t, p in zip(classes.view(-1), preds.view(-1)):
+            confusion_matrix[t.long(), p.long()] += 1
+    
+    return confusion_matrix.diag()/confusion_matrix.sum(1)
 
 
 if __name__ == '__main__':
     main()
 
     
-## python main_lincls.py --multiprocessing-distributed --world-size 1 --rank 0 --pretrained checkpoints/moco_resnet50_lr=0.00015_adamw_warmup=10_bs=4096/checkpoint_0019.pth.tar --pretrained_id bs=4096
+## python main_lincls.py --pretrained checkpoints/moco_resnet50_lr=0.00015_adamw_warmup=10_bs=4096/checkpoint_0019.pth.tar --pretrained_id bs=4096
 
-## python main_lincls.py --multiprocessing-distributed --world-size 1 --rank 0 --pretrained checkpoints/moco_resnet50_lr=0.0015_adamw_warmup=0_bs=512/checkpoint_0025.pth.tar --pretrained_id bs=512
+## python main_lincls.py --pretrained checkpoints/moco_resnet50_lr=0.00015_adamw_warmup=10_bs=4096_ddb/checkpoint_0013.pth.tar -ddb --pretrained_id ddb
+
+## python main_lincls.py --eval_model checkpoints/mocolincls_lr=0.01_bs=1024_ddb_fs/checkpoint_0010.pth.tar -e
+
+## python main_lincls.py --eval_model checkpoints/mocolincls_lr=0.001_bs=1024_ddb_pt=ddb/checkpoint_0010.pth.tar -e
+
+## python main_lincls.py --eval_model checkpoints/mocolincls_lr=0.001_bs=1024_ddb/checkpoint_0010.pth.tar -e
+
+## python main_lincls.py --eval_model checkpoints/mocolincls_lr=0.001_bs=1024_ddb_pt=bs=4096/checkpoint_0010.pth.tar -e

@@ -73,7 +73,7 @@ class fMoWMultibandDataset(Dataset):
         self.data_len = len(self.indices)
         self.transforms = transforms
         self.resize = resize
-        self.categories = {}
+        self.categories = pickle.load(open('fmow-category-labels.pkl', 'rb'))
         
     def __len__(self):
         return self.data_len
@@ -94,11 +94,7 @@ class fMoWMultibandDataset(Dataset):
         image_path = selection["image_path"]
         image = torch.FloatTensor(self.open_image(image_path))
         category = selection["category"] 
-        if category in self.categories:
-            label = self.categories[category]
-        else:
-            self.categories[category] = len(self.categories)
-            label = self.categories[category]
+        label = self.categories[category]
         if self.transforms:
             # note that images is a list of 2 images if TwoCropTranform is used
             images = self.transforms(image)
@@ -111,14 +107,11 @@ if __name__ == '__main__':
     
     import torchvision.transforms as transforms
     from tqdm import tqdm
-    d1 = fMoWMultibandDataset('/atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/val.csv', transforms.Resize(32))
-    location_ids = set()
-    categories = set()
+    d1 = fMoWMultibandDataset('/atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/val.csv')
     for item in tqdm(d1):
-        location_ids.add(item[2])
-        categories.add(item[3])
-    print(len(location_ids))
-    print(len(categories))
+        pass
+    print(d1.categories)
+    pickle.dump(d1.categories, open('fmow_category_labels.pkl', 'wb'))
     #print(d1[0][0].shape, d1[0][1], d1[0][2])
     #print(d1[0][0].sum())
     """

@@ -13,7 +13,7 @@ class MoCo(nn.Module):
     Build a MoCo model with a base encoder, a momentum encoder, and two MLPs
     https://arxiv.org/abs/1911.05722
     """
-    def __init__(self, base_encoder, num_bands=13, dim=256, mlp_dim=4096, T=1.0):
+    def __init__(self, base_encoder, arch, num_bands=13, dim=256, mlp_dim=4096, T=1.0):
         """
         num_bands: number of input bands. Used here for ResNet. Passed directly to VIT while creating the base encoder in main_moco.py (default: 13)
         dim: feature dimension (default: 256)
@@ -27,6 +27,8 @@ class MoCo(nn.Module):
         # build encoders
         self.base_encoder = base_encoder(num_classes=mlp_dim)
         self.momentum_encoder = base_encoder(num_classes=mlp_dim)
+        
+        self.arch = arch
 
         self._build_projector_and_predictor_mlps(num_bands, dim, mlp_dim)
 
@@ -108,8 +110,14 @@ class MoCo_ResNet(MoCo):
         self.momentum_encoder.fc = self._build_mlp(2, hidden_dim, mlp_dim, dim)
 
         # first conv layer
-        self.base_encoder.conv1 = nn.Conv2d(num_bands, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
-        self.momentum_encoder.conv1 = nn.Conv2d(num_bands, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
+        if self.arch.startswith('resnet'):
+            self.base_encoder.conv1 = nn.Conv2d(num_bands, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
+            self.momentum_encoder.conv1 = nn.Conv2d(num_bands, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
+        elif self.arch.startswith('sat_resnet'):
+            self.base_encoder.conv1 = nn.Conv2d(num_bands, 64, kernel_size=3, stride=1, padding=1, bias=False)
+            self.momentum_encoder.conv1 = nn.Conv2d(num_bands, 64, kernel_size=3, stride=1, padding=1, bias=False)
+        else:
+            raise NotImplementedError
 
         # predictor
         self.predictor = self._build_mlp(2, dim, mlp_dim, dim, False)

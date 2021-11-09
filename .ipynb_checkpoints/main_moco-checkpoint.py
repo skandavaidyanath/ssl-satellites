@@ -40,6 +40,7 @@ import moco.optimizer
 from fmow_dataloader import fMoWMultibandDataset, fMoWRGBDataset
 import viewmaker_moco
 import vits
+from moco.sat_resnet import resnet50
 
 # TODO: Add a downstream task so we can check our results
 
@@ -47,25 +48,27 @@ torchvision_model_names = sorted(name for name in torchvision_models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(torchvision_models.__dict__[name]))
 
-model_names = ['vit_small', 'vit_base', 'vit_conv_small', 'vit_conv_base'] + torchvision_model_names
+model_names = ['vit_small', 'vit_base', 'vit_conv_small', 'vit_conv_base'] \
+                + ['sat_resnet50'] \
+                + torchvision_model_names
 
 parser = argparse.ArgumentParser(description='MoCo Pre-Training')
 parser.add_argument('data', metavar='DIR', help='path to dataset')
 parser.add_argument('--dataset-name', type=str, help='Name of the dataset', default='fmow-multi', choices=['fmow-rgb', 'fmow-multi'])
 parser.add_argument('--dont-drop-bands', '-ddb', action='store_true')
 parser.add_argument('--viewmaker', '-vm', action='store_true', help='Using viewmaker or not')
-parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
+parser.add_argument('-a', '--arch', metavar='ARCH', default='sat_resnet50',
                     choices=model_names,
                     help='model architecture: ' +
                         ' | '.join(model_names) +
-                        ' (default: resnet50)')
+                        ' (default: sat_resnet50)')
 parser.add_argument('-j', '--workers', default=32, type=int, metavar='N',
                     help='number of data loading workers (default: 32)')
 parser.add_argument('--epochs', default=100, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-parser.add_argument('-b', '--batch-size', default=512, type=int,
+parser.add_argument('-b', '--batch-size', default=4096, type=int,
                     metavar='N',
                     help='mini-batch size (default: 4096), this is the total '
                          'batch size of all GPUs on the current node when '
@@ -124,6 +127,8 @@ parser.add_argument('--warmup-epochs', default=0, type=int, metavar='N',
                     help='number of warmup epochs')
 parser.add_argument('--crop-min', default=0.08, type=float,
                     help='minimum scale for random cropping (default: 0.08)')
+parser.add_argument('--resize', default=50, type=int)
+parser.add_argument('--crop-size', default=32, type=int)
 
 
 def main():
@@ -203,7 +208,7 @@ def main_worker(gpu, ngpus_per_node, args):
     # follow BYOL's augmentation recipe: https://arxiv.org/abs/2006.07733 
     # But use only those usable for multiband images and add some more
     augmentation1 = [
-        transforms.Resize(32),         
+        transforms.Resize(50),         
         transforms.RandomResizedCrop(32, scale=(args.crop_min, 1.)),
         #transforms.RandomApply([
         #    transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
@@ -211,15 +216,15 @@ def main_worker(gpu, ngpus_per_node, args):
         #transforms.RandomGrayscale(p=0.2),     # RandomGrayscale doesn't work on !=3 channels
         #transforms.RandomApply([moco.loader.GaussianBlur([.1, 2.])], p=1.0),     # need to check this
         transforms.RandomHorizontalFlip(),
-        #transforms.RandomVerticalFlip(),   ## this is new we added
-        #transforms.RandomRotation(90),     ## this is new we added
+        transforms.RandomVerticalFlip(),   ## this is new we added
+        transforms.RandomRotation(90),     ## this is new we added
         moco.loader.LogTransform(epsilon=1.),  ## this is new we added
         normalize,
         moco.loader.RandomDropBands()  ## this is new we added
     ]
 
     augmentation2 = [
-        transforms.Resize(32),        
+        transforms.Resize(50),        
         transforms.RandomResizedCrop(32, scale=(args.crop_min, 1.)),
         #transforms.RandomApply([
         #    transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
@@ -228,8 +233,8 @@ def main_worker(gpu, ngpus_per_node, args):
         #transforms.RandomApply([moco.loader.GaussianBlur([.1, 2.])], p=0.1),   # doesn't work out of the box -- might need to change implementation
         #transforms.RandomApply([moco.loader.Solarize()], p=0.2),               # also doesn't work out of the box -- might need to change implementation
         transforms.RandomHorizontalFlip(),
-        #transforms.RandomVerticalFlip(),   ## this is new we added
-        #transforms.RandomRotation(90),     ## this is new we added
+        transforms.RandomVerticalFlip(),   ## this is new we added
+        transforms.RandomRotation(90),     ## this is new we added
         moco.loader.LogTransform(epsilon=1.),  ## this is new we added
         normalize,
         moco.loader.RandomDropBands()  ## this is new we added
@@ -244,24 +249,28 @@ def main_worker(gpu, ngpus_per_node, args):
     print("=> creating model '{}'".format(args.arch))
     if args.arch.startswith('vit'):
         model = moco.builder.MoCo_ViT(
-            partial(vits.__dict__[args.arch], in_chans=13, stop_grad_conv1=args.stop_grad_conv1), num_bands=13, dim=args.moco_dim, mlp_dim=args.moco_mlp_dim, T=args.moco_t)
+            partial(vits.__dict__[args.arch], in_chans=13, stop_grad_conv1=args.stop_grad_conv1), arch=args.arch, num_bands=13, dim=args.moco_dim, mlp_dim=args.moco_mlp_dim, T=args.moco_t)
+    elif args.arch == 'sat_resnet50':
+        # TODO: This is set for 13 band inputs! Need to change for 3 band inputs
+        model = moco.builder.MoCo_ResNet(
+            moco.sat_resnet.resnet50, arch=args.arch, num_bands=13, dim=args.moco_dim, mlp_dim=args.moco_mlp_dim, T=args.moco_t)
     else:
         model = moco.builder.MoCo_ResNet(
-            partial(torchvision_models.__dict__[args.arch], zero_init_residual=True), num_bands=13, dim=args.moco_dim, mlp_dim=args.moco_mlp_dim, T=args.moco_t)
+            partial(torchvision_models.__dict__[args.arch], zero_init_residual=True), arch=args.arch, num_bands=13, dim=args.moco_dim, mlp_dim=args.moco_mlp_dim, T=args.moco_t)
 
     # infer learning rate before changing batch size
     args.base_lr = args.lr   ## for logging purposes
     args.lr = args.lr * args.batch_size / 256
     
     ## Set up some housekeeping
-    logfile = f'moco_{args.arch}_lr={args.base_lr}_{args.optimizer}_warmup={args.warmup_epochs}_bs={args.batch_size}'
+    logfile = f'moco_{args.arch}_lr={args.base_lr}_{args.optimizer}_warmup={args.warmup_epochs}_bs={args.batch_size}_resize={args.resize}_cropsize={args.crop_size}'
     if args.dont_drop_bands:
         logfile += f'_ddb'
     if args.viewmaker:
         logfile += f'_vm'
-    if not os.path.exists(f'checkpoints/{logfile}/'):
+    if not os.path.isdir(f'checkpoints/{logfile}/'):
         os.makedirs(f'checkpoints/{logfile}/')
-    if not os.path.exists(f'runs/{logfile}'):
+    if not os.path.isdir(f'runs/{logfile}'):
         os.makedirs(f'runs/{logfile}/')
 
     if not torch.cuda.is_available():
@@ -278,6 +287,7 @@ def main_worker(gpu, ngpus_per_node, args):
             # When using a single GPU per process and per
             # DistributedDataParallel, we need to divide the batch size
             # ourselves based on the total number of GPUs we have
+            args.total_batchsize = args.batch_size
             args.batch_size = int(args.batch_size / args.world_size)
             args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
             model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
@@ -503,4 +513,4 @@ if __name__ == '__main__':
 
 
 
-#python main_moco.py --dataset-name fmow-multi -p 10 --moco-m-cos --crop-min=.2 --multiprocessing-distributed --world-size 1 --rank 0 /atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/train.csv
+#python main_moco.py --dataset-name fmow-multi -p 10 --moco-m-cos --crop-min=.2 --multiprocessing-distributed --world-size 1 --rank 0 /atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/train.csv --resize 50 --crop-size 32
