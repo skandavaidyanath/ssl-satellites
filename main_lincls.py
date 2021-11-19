@@ -34,12 +34,13 @@ import torchvision.models as torchvision_models
 import vits
 from fmow_dataloader import fMoWMultibandDataset, fMoWRGBDataset
 import moco.loader
+from moco.sat_resnet import resnet50
 
 torchvision_model_names = sorted(name for name in torchvision_models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(torchvision_models.__dict__[name]))
 
-model_names = ['vit_small', 'vit_base', 'vit_conv_small', 'vit_conv_base'] + torchvision_model_names
+model_names = ['vit_small', 'vit_base', 'vit_conv_small', 'vit_conv_base'] + ['sat_resnet50'] + torchvision_model_names
 
 parser = argparse.ArgumentParser(description='MoCo Finetuning')
 parser.add_argument('--train_data', metavar='DIR', default='/atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/train.csv', help='path to train dataset')
@@ -50,7 +51,7 @@ parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                     choices=model_names,
                     help='model architecture: ' +
                         ' | '.join(model_names) +
-                        ' (default: resnet50)')
+                        ' (default: sat_resnet50)')
 parser.add_argument('-j', '--workers', default=16, type=int, metavar='N',
                     help='number of data loading workers (default: 32)')
 parser.add_argument('--epochs', default=90, type=int, metavar='N',
@@ -100,6 +101,10 @@ parser.add_argument('--pretrained_id', default='', type=str,
 parser.add_argument('--eval_model', default='', type=str, help='path to eval model')
 parser.add_argument('--fully-supervised', '-fs', action='store_true',
                     help='train a fully supervised model from scratch')
+
+## augmentation configs
+parser.add_argument('--resize', default=32, type=int)
+parser.add_argument('--crop-size', default=32, type=int)
 
 best_acc1 = 0
 
@@ -189,6 +194,18 @@ def main_worker(gpu, ngpus_per_node, args):
             raise NotImplementedError
         del model.head
         linear_keyword = 'head'
+    elif args.arch.startswith('sat_resnet50'):
+        model = resnet50()
+        hidden_dim = model.fc.weight.shape[1]
+        if args.dataset_name == 'fmow-multi':
+            output_dim = 62
+            num_bands = 13
+        else:
+            raise NotImplementedError
+        del model.fc, model.conv1
+        model.fc = nn.Linear(hidden_dim, output_dim)
+        model.conv1 = nn.Conv2d(num_bands, 64, kernel_size=3, stride=1, padding=1, bias=False)
+        linear_keyword = 'fc'
     else:
         model = torchvision_models.__dict__[args.arch]()
         hidden_dim = model.fc.weight.shape[1]
@@ -343,8 +360,8 @@ def main_worker(gpu, ngpus_per_node, args):
         raise NotImplementedError
     elif args.dataset_name == 'fmow-multi':
         augmentations = [
-            transforms.Resize(32),        
-            transforms.RandomResizedCrop(32),
+            transforms.Resize(args.resize),        
+            transforms.RandomResizedCrop(args.crop_size),
             transforms.RandomHorizontalFlip(),
             moco.loader.LogTransform(epsilon=1.),
             normalize,
@@ -378,7 +395,7 @@ def main_worker(gpu, ngpus_per_node, args):
         return
     
     ## Set up some housekeeping
-    logfile = f'mocolincls_lr={args.lr}_bs={args.batch_size}'
+    logfile = f'mocolincls_lr={args.lr}_bs={args.batch_size}_r={args.resize}_rc={args.crop_size}'
     if args.dont_drop_bands:
         logfile += '_ddb'
     if args.pretrained:
@@ -466,6 +483,10 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         losses.update(loss.item(), images.size(0))
         top1.update(acc1[0], images.size(0))
         top5.update(acc5[0], images.size(0))
+        
+        ## per class accuracy
+        #TODO NEED A PROGRESS METER THING HERE
+        #per_class_acc = per_class_accuracy(output, target)
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -514,8 +535,8 @@ def validate(val_loader, model, criterion, args):
             top5.update(acc5[0], images.size(0))
             
             ## per class accuracy
-            per_class_acc = accuracy(output, target)
-            TODO NEED A PROGRESS METER THING HERE
+            #TODO NEED A PROGRESS METER THING HERE
+            #per_class_acc = per_class_accuracy(output, target)
 
             # measure elapsed time
             batch_time.update(time.time() - end)
@@ -652,3 +673,9 @@ if __name__ == '__main__':
 ## python main_lincls.py --eval_model checkpoints/mocolincls_lr=0.001_bs=1024_ddb/checkpoint_0010.pth.tar -e
 
 ## python main_lincls.py --eval_model checkpoints/mocolincls_lr=0.001_bs=1024_ddb_pt=bs=4096/checkpoint_0010.pth.tar -e
+
+###################
+
+## python main_lincls.py --pretrained checkpoints/moco_sat_resnet50_lr=0.00015_adamw_warmup=10_bs=1024_resize=50_cropsize=32/checkpoint_0031.pth.tar --pretrained_id sat_bs=1024_r=50_rc=32 --resize 50 --crop-size 32
+
+## python main_lincls.py --pretrained checkpoints/moco_resnet50_lr=0.00015_adamw_warmup=10_bs=4096_resize=80_cropsize=64/checkpoint_0029.pth.tar --pretrained_id bs=4096_r=80_rc=64 --resize 80 --crop-size 64

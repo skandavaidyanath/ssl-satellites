@@ -60,7 +60,7 @@ class RandomDropBands(object):
     """
         
     def __call__(self, x):
-        num_bands = np.random.randint(0, x.shape[0])   ## number of bands to keep
+        num_bands = np.random.randint(1, x.shape[0])   ## number of bands to keep but keep at least one band
         chosen_bands = np.random.choice([*range(x.shape[0])], num_bands, replace=False)
         band_mask = torch.stack([torch.ones(x.shape[1:]) if i in chosen_bands else torch.zeros(x.shape[1:]) for i in range(x.shape[0])])
         masked_image = x * band_mask

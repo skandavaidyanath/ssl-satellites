@@ -14,6 +14,8 @@ from tqdm import tqdm
 from torch.utils.data.dataset import Dataset
 from PIL import Image
 
+from moco.loader import RandomDropBands
+
 Image.MAX_IMAGE_PIXELS = None
 warnings.simplefilter('ignore', Image.DecompressionBombWarning)
 #warnings.filterwarnings("ignore")
@@ -23,7 +25,7 @@ class fMoWRGBDataset(Dataset):
     def __init__(self, csv_path, transforms=None):
         """
         Args:
-            csv_path (string): path to csv file (Works for /atlas/u/buzkent/patchdrop/data/fMoW/train_62classes.csv fmow-rgb)
+            csv_path (string): path to csv file (Works for /atlas/u/pliu1/housing_event_pred/data/fmow-csv/fmow-train.csv fmow-rgb)
             transform: pytorch transforms for transforms and tensor conversion
         """
         # Transforms
@@ -100,11 +102,117 @@ class fMoWMultibandDataset(Dataset):
             images = self.transforms(image)
             
         return (images, image_path, label)
+    
+    
+class fMoWJointDataset(Dataset):
+    '''fMoW Joint Dataset'''
+    def __init__(self, 
+                 csv_path, 
+                 sentinel_transforms=None,
+                 rgb_transforms=None,
+                 joint_transform='either'):
+        """ Initialize the dataset.
+        
+        Args:
+            csv_file (string): Path to the csv file with annotations.  (Works for /atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/train.csv fmow-sentinel)
+            sentinel_transforms (callable, optional): Optional transform to be applied
+                on tensor images.
+            rgb_transforms (callable, optional): Optional transform to be applied
+                on tensor images.
+            joint_transform: 'either' or 'drop'
+        """
+        self.data_info = pd.read_csv(csv_path)
+        self.data_info = self.data_info[self.data_info['fmow_path'].notna()]
+        self.indices = self.data_info.index.unique().to_numpy()
+        self.data_len = len(self.indices)
+        self.sentinel_transforms = sentinel_transforms
+        self.rgb_transforms = rgb_transforms
+        self.joint_transform = joint_transform
+        self.categories = pickle.load(open('fmow-category-labels.pkl', 'rb'))
+        
+    def __len__(self):
+        return self.data_len
+    
+    def open_image(self, img_path):
+        with rasterio.open(img_path) as data:
+            img = data.read()
+        return img
+
+    def __getitem__(self, idx):
+        index = self.indices[idx]
+        selection = self.data_info.loc[index]
+        
+        sentinel_image_path = selection["image_path"]
+        rgb_image_path = selection["fmow_path"]
+        
+        sentinel_image = torch.FloatTensor(self.open_image(sentinel_image_path))
+        rgb_image = Image.open(rgb_image_path)
+        
+        if self.sentinel_transforms:
+            # TwoCropsTransform will be used here
+            sentinel_images = self.sentinel_transforms(sentinel_image)
+        if self.rgb_transforms:
+            # TwoCropsTransform will be used here
+            rgb_images = self.rgb_transforms(rgb_image)
+        
+        assert sentinel_images[0].shape[1:] == rgb_images[0].shape[1:]
+        assert sentinel_images[1].shape[1:] == rgb_images[1].shape[1:]
+        
+        joint_images = [torch.cat([sentinel_images[i], rgb_images[i]], dim=0) for i in range(2)]
+        
+        if self.joint_transform == 'either':
+            rgb_mask = torch.stack([torch.ones(joint_images[0].shape[1:]) if i in range(sentinel_images[0].shape[0]) else torch.zeros(joint_images[0].shape[1:]) for i in range(joint_images[0].shape[0])])
+            sentinel_mask = torch.stack([torch.zeros(joint_images[0].shape[1:]) if i in range(sentinel_images[0].shape[0]) else torch.ones(joint_images[0].shape[1:]) for i in range(joint_images[0].shape[0])])
+            
+            pair_type = np.random.randint(0,4)
+            if pair_type == 0:
+                ## Sentinel, Sentinel
+                joint_images = [image * rgb_mask for image in joint_images]
+            if pair_type == 1:
+                ## Sentinel, RGB
+                joint_images = [joint_images[0] * rgb_mask, joint_images[1] * sentinel_mask]
+            if pair_type == 2:
+                ## RGB, Sentinel
+                joint_images = [joint_images[0] * sentinel_mask, joint_images[1] * rgb_mask]
+            if pair_type == 3:
+                ## RGB, RGB
+                joint_images = [image * sentinel_mask for image in joint_images]
+        elif self.joint_transform == 'drop':
+            joint_images = [RandomDropBands()(image) for image in joint_images]
+        else:
+            raise NotImplementedError
+        
+        category = selection["category"] 
+        label = self.categories[category]
+            
+        return (joint_images, [sentinel_image_path, rgb_image_path], label)
 
 
 
 if __name__ == '__main__':
     
+    import torchvision.transforms as transforms
+    from moco.loader import TwoCropsTransform
+    
+#     d = fMoWJointDataset('/atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/val.csv',
+#                         TwoCropsTransform(transforms.Compose([transforms.RandomResizedCrop(4), RandomDropBands()]),transforms.Compose([transforms.RandomResizedCrop(4), RandomDropBands()])),
+#                         TwoCropsTransform(transforms.Compose([transforms.RandomResizedCrop(4), transforms.ToTensor()]),
+#                                           transforms.Compose([transforms.RandomResizedCrop(4), transforms.ToTensor()]))
+#                        )
+
+    d = fMoWJointDataset('/atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/val.csv',
+                            TwoCropsTransform(transforms.RandomResizedCrop(4),
+                                            transforms.RandomResizedCrop(4)),
+                            TwoCropsTransform(transforms.Compose([transforms.RandomResizedCrop(4), transforms.ToTensor()]),
+                                           transforms.Compose([transforms.RandomResizedCrop(4), transforms.ToTensor()])),
+                            'drop')
+   
+    print(d[0][0])
+    print('**********')
+    print(d[1][0])
+    print('***********')
+    print(d[2][0])
+    """
     import torchvision.transforms as transforms
     from tqdm import tqdm
     d1 = fMoWMultibandDataset('/atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/val.csv')
@@ -114,7 +222,6 @@ if __name__ == '__main__':
     pickle.dump(d1.categories, open('fmow_category_labels.pkl', 'wb'))
     #print(d1[0][0].shape, d1[0][1], d1[0][2])
     #print(d1[0][0].sum())
-    """
     
     # Calculate the channel stats
     df = pd.read_csv('/atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/train.csv')
