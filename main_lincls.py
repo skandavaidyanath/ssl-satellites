@@ -32,7 +32,7 @@ import torchvision.datasets as datasets
 import torchvision.models as torchvision_models
 
 import vits
-from fmow_dataloader import fMoWMultibandDataset, fMoWRGBDataset
+from fmow_dataloader import fMoWMultibandDataset, fMoWRGBDataset, fMoWJointDataset
 import moco.loader
 from moco.sat_resnet import resnet50
 
@@ -45,9 +45,9 @@ model_names = ['vit_small', 'vit_base', 'vit_conv_small', 'vit_conv_base'] + ['s
 parser = argparse.ArgumentParser(description='MoCo Finetuning')
 parser.add_argument('--train_data', metavar='DIR', default='/atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/train.csv', help='path to train dataset')
 parser.add_argument('--val_data', metavar='DIR', default='/atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/val.csv', help='path to val dataset')
-parser.add_argument('--dataset-name', type=str, default='fmow-multi', choices=['fmow-rgb', 'fmow-multi'], help='Name of the dataset')
+parser.add_argument('--dataset-name', type=str, default='fmow-joint', choices=['fmow-rgb', 'fmow-multi', 'fmow-joint'], help='Name of the dataset')
 parser.add_argument('--dont-drop-bands', '-ddb', action='store_true')
-parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
+parser.add_argument('-a', '--arch', metavar='ARCH', default='sat_resnet50',
                     choices=model_names,
                     help='model architecture: ' +
                         ' | '.join(model_names) +
@@ -103,8 +103,10 @@ parser.add_argument('--fully-supervised', '-fs', action='store_true',
                     help='train a fully supervised model from scratch')
 
 ## augmentation configs
-parser.add_argument('--resize', default=32, type=int)
+parser.add_argument('--sentinel-resize', default=50, type=int)
+parser.add_argument('--rgb-resize', default=224, type=int)
 parser.add_argument('--crop-size', default=32, type=int)
+parser.add_argument('--joint-transform', default='sentinel', choices=['rgb', 'sentinel', 'both', 'drop'], type=str)
 
 best_acc1 = 0
 
@@ -185,23 +187,31 @@ def main_worker(gpu, ngpus_per_node, args):
     # create model
     print("=> creating model '{}'".format(args.arch))
     ### UPDATE THE FINAL LAYER AND CHANGE IT TO WHAT WE NEED. 62 CLASSES NOT 1000
+    if 'fmow' in args.dataset_name:
+        output_dim = 62
+    else:
+        raise NotImplementedError
     if args.arch.startswith('vit'):
         model = vits.__dict__[args.arch]()
         hidden_dim = model.head.weight.shape[1]
-        if args.dataset_name == 'fmow-multi':
-            output_dim = 62
-        else:
-            raise NotImplementedError
+        #if args.dataset_name == 'fmow-multi':
+        #    output_dim = 62
+        #else:
+        #    raise NotImplementedError
         del model.head
         linear_keyword = 'head'
     elif args.arch.startswith('sat_resnet50'):
         model = resnet50()
         hidden_dim = model.fc.weight.shape[1]
-        if args.dataset_name == 'fmow-multi':
-            output_dim = 62
-            num_bands = 13
+        #if args.dataset_name == 'fmow-multi':
+        #    output_dim = 62
+        #    num_bands = 13
+        #else:
+        #    raise NotImplementedError
+        if 'joint' in args.pretrained_id:
+            num_bands = 16
         else:
-            raise NotImplementedError
+            num_bands = 13
         del model.fc, model.conv1
         model.fc = nn.Linear(hidden_dim, output_dim)
         model.conv1 = nn.Conv2d(num_bands, 64, kernel_size=3, stride=1, padding=1, bias=False)
@@ -209,11 +219,10 @@ def main_worker(gpu, ngpus_per_node, args):
     else:
         model = torchvision_models.__dict__[args.arch]()
         hidden_dim = model.fc.weight.shape[1]
-        if args.dataset_name == 'fmow-multi':
-            output_dim = 62
-            num_bands = 13
+        if 'joint' in args.pretrained_id:
+            num_bands = 16
         else:
-            raise NotImplementedError
+            num_bands = 13
         del model.fc, model.conv1
         model.fc = nn.Linear(hidden_dim, output_dim)
         model.conv1 = nn.Conv2d(num_bands, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
@@ -228,7 +237,7 @@ def main_worker(gpu, ngpus_per_node, args):
         getattr(model, linear_keyword).weight.data.normal_(mean=0.0, std=0.01)
         getattr(model, linear_keyword).bias.data.zero_()
         
-    if args.evaluate and args.eval_model:
+    if args.evaluate:
         if os.path.isfile(args.eval_model):
             print("=> loading checkpoint '{}'".format(args.eval_model))
             checkpoint = torch.load(args.eval_model, map_location="cpu")
@@ -347,36 +356,112 @@ def main_worker(gpu, ngpus_per_node, args):
     # Data loading code
     traindir = args.train_data
     valdir = args.val_data
-    
-    if args.dataset_name == 'fmow-rgb':
-        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                    std=[0.229, 0.224, 0.225])
-    else:
+        
+    # create augmentations
+    # follow BYOL's augmentation recipe: https://arxiv.org/abs/2006.07733 
+    # But use only those usable for multiband images and add some more
+    if args.dataset_name == 'fmow-multi':
         channel_stats = pickle.load(open('./fmow-multiband-log-stats.pkl', 'rb'))
         normalize = transforms.Normalize(mean=channel_stats['log_channel_means'],
                                             std=channel_stats['log_channel_stds'])
-   
-    if args.dataset_name == 'fmow-rgb':
-        raise NotImplementedError
-    elif args.dataset_name == 'fmow-multi':
-        augmentations = [
-            transforms.Resize(args.resize),        
+        
+        train_augmentations = [
+            transforms.Resize(args.sentinel_resize),         
             transforms.RandomResizedCrop(args.crop_size),
             transforms.RandomHorizontalFlip(),
-            moco.loader.LogTransform(epsilon=1.),
+            transforms.RandomVerticalFlip(),   ## this is new we added
+            transforms.RandomRotation(90),     ## this is new we added
+            moco.loader.LogTransform(epsilon=1.),  ## this is new we added
             normalize,
-            moco.loader.RandomDropBands()
+            moco.loader.RandomDropBands()  ## this is new we added
         ]
+        
+        val_augmentations = [
+            transforms.Resize(args.sentinel_resize),         
+            transforms.CenterCrop(args.crop_size),
+            moco.loader.LogTransform(epsilon=1.),  ## this is new we added
+            normalize,
+            moco.loader.RandomDropBands()  ## this is new we added
+        ]
+
         if args.dont_drop_bands:
-            augmentations = augmentations[:-1]
+            train_augmentations = train_augmentations[:-1]
+            val_augmentations = val_augmentations[:-1]
         train_dataset = fMoWMultibandDataset(traindir, 
                                             transforms.Compose(
-                                                augmentations
+                                                train_augmentations
                                             ))
         val_dataset = fMoWMultibandDataset(valdir, 
                                             transforms.Compose(
-                                                augmentations
+                                                val_augmentations
                                             ))
+    
+    elif args.dataset_name == 'fmow-joint':
+        rgb_normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                    std=[0.229, 0.224, 0.225])
+        channel_stats = pickle.load(open('./fmow-multiband-log-stats.pkl', 'rb'))
+        sentinel_normalize = transforms.Normalize(mean=channel_stats['log_channel_means'],
+                                            std=channel_stats['log_channel_stds'])                   
+                                         
+        rgb_train_transforms = [
+            transforms.Resize(args.rgb_resize),
+            transforms.RandomResizedCrop(args.crop_size),
+            transforms.RandomApply([
+                transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
+            ], p=0.8),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.RandomApply([moco.loader.GaussianBlur([.1, 2.])], p=1.0),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomVerticalFlip(),   ## this is new we added
+            transforms.RandomRotation(90),     ## this is new we added
+            transforms.ToTensor(),
+            rgb_normalize,
+        ]
+        
+        rgb_val_transforms = [
+            transforms.Resize(args.rgb_resize),
+            transforms.CenterCrop(args.crop_size),
+            transforms.ToTensor(),
+            rgb_normalize,
+            
+        ]
+        
+        sentinel_train_transforms = [
+            transforms.Resize(args.sentinel_resize),         
+            transforms.RandomResizedCrop(args.crop_size),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomVerticalFlip(),   ## this is new we added
+            transforms.RandomRotation(90),     ## this is new we added
+            moco.loader.LogTransform(epsilon=1.),  ## this is new we added
+            sentinel_normalize,
+            moco.loader.RandomDropBands()  ## this is new we added
+        ]
+        
+        sentinel_val_transforms = [
+            transforms.Resize(args.sentinel_resize),         
+            transforms.CenterCrop(args.crop_size),
+            moco.loader.LogTransform(epsilon=1.),  ## this is new we added
+            sentinel_normalize,
+            moco.loader.RandomDropBands()  ## this is new we added
+        ]
+        
+        
+        if args.dont_drop_bands:
+            sentinel_train_transforms = sentinel_train_transforms[:-1]
+            sentinel_val_transforms = sentinel_val_transforms[:-1]
+            
+        train_dataset = fMoWJointDataset(traindir,
+                                        sentinel_transforms=transforms.Compose(sentinel_train_transforms),
+                                        rgb_transforms=transforms.Compose(rgb_train_transforms),
+                                        joint_transform=args.joint_transform)
+        
+        val_dataset = fMoWJointDataset(valdir,
+                                        sentinel_transforms=transforms.Compose(sentinel_val_transforms), 
+                                        rgb_transforms=transforms.Compose(rgb_val_transforms),
+                                        joint_transform=args.joint_transform)
+        
+    else:
+        raise NotImplementedError
     
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
@@ -395,7 +480,9 @@ def main_worker(gpu, ngpus_per_node, args):
         return
     
     ## Set up some housekeeping
-    logfile = f'mocolincls_lr={args.lr}_bs={args.batch_size}_r={args.resize}_rc={args.crop_size}'
+    logfile = f'mocolincls_lr={args.lr}_bs={args.batch_size}'
+    if args.dataset_name == 'fmow-joint':
+        logfile += f'_joint={args.joint_transform}'
     if args.dont_drop_bands:
         logfile += '_ddb'
     if args.pretrained:
@@ -679,3 +766,34 @@ if __name__ == '__main__':
 ## python main_lincls.py --pretrained checkpoints/moco_sat_resnet50_lr=0.00015_adamw_warmup=10_bs=1024_resize=50_cropsize=32/checkpoint_0031.pth.tar --pretrained_id sat_bs=1024_r=50_rc=32 --resize 50 --crop-size 32
 
 ## python main_lincls.py --pretrained checkpoints/moco_resnet50_lr=0.00015_adamw_warmup=10_bs=4096_resize=80_cropsize=64/checkpoint_0029.pth.tar --pretrained_id bs=4096_r=80_rc=64 --resize 80 --crop-size 64
+
+##################
+
+## TODO:
+
+## python main_lincls.py --pretrained checkpoints/moco_sat_resnet50_lr=0.00015_bs=512_joint=either_ddb/checkpoint_0052.pth.tar --pretrained_id joint=either-ddb --joint-transform sentinel -ddb
+
+## python main_lincls.py --pretrained checkpoints/moco_sat_resnet50_lr=0.00015_bs=512_joint=either_ddb/checkpoint_0052.pth.tar --pretrained_id joint=either-ddb --joint-transform rgb -ddb
+
+## python main_lincls.py --pretrained checkpoints/moco_sat_resnet50_lr=0.00015_bs=512_joint=either_ddb/checkpoint_0052.pth.tar --pretrained_id joint=either-ddb --joint-transform both -ddb
+
+#------------
+
+## python main_lincls.py --pretrained checkpoints/moco_sat_resnet50_lr=0.00015_bs=512_joint=either/checkpoint_0077.pth.tar --pretrained_id joint=either --joint-transform sentinel -ddb --lr 1e-4
+
+## python main_lincls.py --pretrained checkpoints/moco_sat_resnet50_lr=0.00015_bs=512_joint=either/checkpoint_0077.pth.tar --pretrained_id joint=either --joint-transform rgb -ddb --lr 1e-4
+
+## python main_lincls.py --pretrained checkpoints/moco_sat_resnet50_lr=0.00015_bs=512_joint=either/checkpoint_0077.pth.tar --pretrained_id joint=either --joint-transform both -ddb --lr 1e-4
+
+#-----------
+
+## python main_lincls.py --pretrained checkpoints/moco_sat_resnet50_lr=0.00015_bs=512_joint=drop_ddb/checkpoint_0052.pth.tar --pretrained_id joint=drop-ddb --joint-transform rgb -ddb --lr 1e-4
+
+#------------
+#------------
+
+## python main_lincls.py --pretrained checkpoints/moco_sat_resnet50_lr=0.00015_bs=512_joint=drop_ddb/checkpoint_0052.pth.tar --pretrained_id joint=drop-ddb --joint-transform sentinel -ddb --lr 1e-4
+
+## python main_lincls.py --pretrained checkpoints/moco_sat_resnet50_lr=0.00015_bs=512_joint=drop_ddb/checkpoint_0052.pth.tar --pretrained_id joint=drop-ddb --joint-transform both -ddb --lr 1e-4
+
+

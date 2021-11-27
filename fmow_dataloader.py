@@ -119,7 +119,7 @@ class fMoWJointDataset(Dataset):
                 on tensor images.
             rgb_transforms (callable, optional): Optional transform to be applied
                 on tensor images.
-            joint_transform: 'either' or 'drop'
+            joint_transform: 'either' or 'drop' or 'both' or 'rgb' or 'sentinel'
         """
         self.data_info = pd.read_csv(csv_path)
         self.data_info = self.data_info[self.data_info['fmow_path'].notna()]
@@ -149,16 +149,21 @@ class fMoWJointDataset(Dataset):
         rgb_image = Image.open(rgb_image_path)
         
         if self.sentinel_transforms:
-            # TwoCropsTransform will be used here
+            # TwoCropsTransform may be used here
             sentinel_images = self.sentinel_transforms(sentinel_image)
         if self.rgb_transforms:
-            # TwoCropsTransform will be used here
+            # TwoCropsTransform may be used here
             rgb_images = self.rgb_transforms(rgb_image)
         
-        assert sentinel_images[0].shape[1:] == rgb_images[0].shape[1:]
-        assert sentinel_images[1].shape[1:] == rgb_images[1].shape[1:]
-        
-        joint_images = [torch.cat([sentinel_images[i], rgb_images[i]], dim=0) for i in range(2)]
+        if isinstance(sentinel_images, list):
+            assert self.joint_transform in ['either', 'drop', 'both']
+            assert sentinel_images[0].shape[1:] == rgb_images[0].shape[1:]
+            assert sentinel_images[1].shape[1:] == rgb_images[1].shape[1:]
+            joint_images = [torch.cat([sentinel_images[i], rgb_images[i]], dim=0) for i in range(2)]
+        else:
+            assert self.joint_transform in ['both', 'rgb', 'sentinel', 'drop']
+            assert sentinel_images.shape[1:] == rgb_images.shape[1:]
+            joint_images = torch.cat([sentinel_images, rgb_images], dim=0)
         
         if self.joint_transform == 'either':
             rgb_mask = torch.stack([torch.ones(joint_images[0].shape[1:]) if i in range(sentinel_images[0].shape[0]) else torch.zeros(joint_images[0].shape[1:]) for i in range(joint_images[0].shape[0])])
@@ -178,9 +183,19 @@ class fMoWJointDataset(Dataset):
                 ## RGB, RGB
                 joint_images = [image * sentinel_mask for image in joint_images]
         elif self.joint_transform == 'drop':
-            joint_images = [RandomDropBands()(image) for image in joint_images]
-        else:
-            raise NotImplementedError
+            if isinstance(joint_images, list):
+                joint_images = [RandomDropBands()(image) for image in joint_images]
+            else:
+                joint_images = RandomDropBands()(joint_images)
+        elif self.joint_transform == 'rgb':
+            sentinel_mask = torch.stack([torch.zeros(joint_images.shape[1:]) if i in range(sentinel_images.shape[0]) else torch.ones(joint_images.shape[1:]) for i in range(joint_images.shape[0])])
+            joint_images = joint_images * sentinel_mask
+        elif self.joint_transform == 'sentinel':
+            rgb_mask = torch.stack([torch.ones(joint_images.shape[1:]) if i in range(sentinel_images.shape[0]) else torch.zeros(joint_images.shape[1:]) for i in range(joint_images.shape[0])])
+            joint_images = joint_images * rgb_mask
+        elif self.joint_transform == 'both':
+            ## Nothing to do here
+            pass
         
         category = selection["category"] 
         label = self.categories[category]
@@ -195,17 +210,17 @@ if __name__ == '__main__':
     from moco.loader import TwoCropsTransform
     
 #     d = fMoWJointDataset('/atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/val.csv',
-#                         TwoCropsTransform(transforms.Compose([transforms.RandomResizedCrop(4), RandomDropBands()]),transforms.Compose([transforms.RandomResizedCrop(4), RandomDropBands()])),
-#                         TwoCropsTransform(transforms.Compose([transforms.RandomResizedCrop(4), transforms.ToTensor()]),
-#                                           transforms.Compose([transforms.RandomResizedCrop(4), transforms.ToTensor()]))
-#                        )
-
+#                             TwoCropsTransform(transforms.RandomResizedCrop(4),
+#                                             transforms.RandomResizedCrop(4)),
+#                             TwoCropsTransform(transforms.Compose([transforms.RandomResizedCrop(4), transforms.ToTensor()]),
+#                                            transforms.Compose([transforms.RandomResizedCrop(4), transforms.ToTensor()])),
+#                             'drop')
+    
     d = fMoWJointDataset('/atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/val.csv',
-                            TwoCropsTransform(transforms.RandomResizedCrop(4),
-                                            transforms.RandomResizedCrop(4)),
-                            TwoCropsTransform(transforms.Compose([transforms.RandomResizedCrop(4), transforms.ToTensor()]),
-                                           transforms.Compose([transforms.RandomResizedCrop(4), transforms.ToTensor()])),
-                            'drop')
+                            transforms.RandomResizedCrop(4),
+                            transforms.Compose([transforms.RandomResizedCrop(4), transforms.ToTensor()]),
+                            'both')
+    
    
     print(d[0][0])
     print('**********')

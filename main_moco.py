@@ -128,7 +128,7 @@ parser.add_argument('--crop-min', default=0.08, type=float,
 parser.add_argument('--sentinel-resize', default=50, type=int)
 parser.add_argument('--rgb-resize', default=224, type=int)
 parser.add_argument('--crop-size', default=32, type=int)
-parser.add_argument('--joint-transform', type=str, choices=['either', 'drop'], default='either')
+parser.add_argument('--joint-transform', type=str, choices=['either', 'drop', 'both'], default='either')
 
 
 def main():
@@ -561,5 +561,7 @@ if __name__ == '__main__':
     main()
 
 
+## TODO:
 
-#python main_moco.py --dataset-name fmow-joint -ddb --joint-transform drop --arch sat_resnet50 -p 10 --moco-m-cos --crop-min=.2 --multiprocessing-distributed --world-size 1 --rank 0 /atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/train.csv
+#python main_moco.py --dataset-name fmow-joint -ddb --joint-transform both --arch sat_resnet50 -p 10 --moco-m-cos --crop-min=.2 --multiprocessing-distributed --world-size 1 --rank 0 /atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/train.csv
+
