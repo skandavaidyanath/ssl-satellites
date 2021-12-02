@@ -28,29 +28,25 @@ class fMoWRGBDataset(Dataset):
             csv_path (string): path to csv file (Works for /atlas/u/pliu1/housing_event_pred/data/fmow-csv/fmow-train.csv fmow-rgb)
             transform: pytorch transforms for transforms and tensor conversion
         """
-        # Transforms
-        self.transforms = transforms
-        # Read the csv file
         self.data_info = pd.read_csv(csv_path, header=0)
-        # First column contains the image paths
-        self.image_arr = np.asarray(self.data_info.iloc[:, 1])
-        # Second column is the labels
-        self.label_arr = np.asarray(self.data_info.iloc[:, 0])
-        # Calculate len
-        self.data_len = len(self.data_info.index)
+        self.indices = self.data_info.index.unique().to_numpy()
+        self.data_len = len(self.indices)
+        self.transforms = transforms
+        self.categories = pickle.load(open('fmow-category-labels.pkl', 'rb'))
 
     def __getitem__(self, index):
-        # Get image name from the pandas df
-        single_image_name = self.image_arr[index]
-        # Open image
-        img_as_img = Image.open(single_image_name)
-        # Transform the image
-        img_as_tensor = self.transforms(img_as_img)
-        # Get label(class) of the image based on the cropped pandas column
-        single_image_label = self.label_arr[index]
+        idx = self.indices[index]
+        selection = self.data_info.loc[index]
+        image_path = selection["image_path"]
+        image = Image.open(image_path)
+        category = selection["category"] 
+        label = self.categories[category]
+        # note that images is a list of 2 images if TwoCropTranform is used
+        images = self.transforms(image)
+        
+        image.close()
 
-        # note that img_as_tensor is a list of 2 images if TwoCropTranform is used
-        return (img_as_tensor, single_image_name, single_image_label)
+        return (images, image_path, label)
 
     def __len__(self):
         return self.data_len
@@ -97,9 +93,8 @@ class fMoWMultibandDataset(Dataset):
         image = torch.FloatTensor(self.open_image(image_path))
         category = selection["category"] 
         label = self.categories[category]
-        if self.transforms:
-            # note that images is a list of 2 images if TwoCropTranform is used
-            images = self.transforms(image)
+        # note that images is a list of 2 images if TwoCropTranform is used
+        images = self.transforms(image)
             
         return (images, image_path, label)
     
@@ -148,12 +143,12 @@ class fMoWJointDataset(Dataset):
         sentinel_image = torch.FloatTensor(self.open_image(sentinel_image_path))
         rgb_image = Image.open(rgb_image_path)
         
-        if self.sentinel_transforms:
-            # TwoCropsTransform may be used here
-            sentinel_images = self.sentinel_transforms(sentinel_image)
-        if self.rgb_transforms:
-            # TwoCropsTransform may be used here
-            rgb_images = self.rgb_transforms(rgb_image)
+        # TwoCropsTransform may be used here
+        sentinel_images = self.sentinel_transforms(sentinel_image)
+        # TwoCropsTransform may be used here
+        rgb_images = self.rgb_transforms(rgb_image)
+        
+        rgb_image.close()
         
         if isinstance(sentinel_images, list):
             assert self.joint_transform in ['either', 'drop', 'both']
@@ -216,17 +211,26 @@ if __name__ == '__main__':
 #                                            transforms.Compose([transforms.RandomResizedCrop(4), transforms.ToTensor()])),
 #                             'drop')
     
-    d = fMoWJointDataset('/atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/val.csv',
-                            transforms.RandomResizedCrop(4),
-                            transforms.Compose([transforms.RandomResizedCrop(4), transforms.ToTensor()]),
-                            'both')
+#     d = fMoWJointDataset('/atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/val.csv',
+#                             transforms.RandomResizedCrop(4),
+#                             transforms.Compose([transforms.RandomResizedCrop(4), transforms.ToTensor()]),
+#                             'both')
+    
+#     print(d[0][0])
+#     print('**********')
+#     print(d[1][0])
+#     print('***********')
+#     print(d[2][0])
+    
+    d = fMoWRGBDataset('/atlas/u/pliu1/housing_event_pred/data/fmow-csv/fmow-train.csv',
+                            transforms.Compose([transforms.RandomResizedCrop(4), transforms.ToTensor()]))
     
    
-    print(d[0][0])
+    print(d[0])
     print('**********')
-    print(d[1][0])
+    print(d[1])
     print('***********')
-    print(d[2][0])
+    print(d[2])
     """
     import torchvision.transforms as transforms
     from tqdm import tqdm

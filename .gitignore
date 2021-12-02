@@ -3,3 +3,4 @@ wandb/
 runs/
 checkpoints/
 .ipynb_checkpoints/
+model_best.pth.tar

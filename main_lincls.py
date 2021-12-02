@@ -43,15 +43,15 @@ torchvision_model_names = sorted(name for name in torchvision_models.__dict__
 model_names = ['vit_small', 'vit_base', 'vit_conv_small', 'vit_conv_base'] + ['sat_resnet50'] + torchvision_model_names
 
 parser = argparse.ArgumentParser(description='MoCo Finetuning')
-parser.add_argument('--train_data', metavar='DIR', default='/atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/train.csv', help='path to train dataset')
-parser.add_argument('--val_data', metavar='DIR', default='/atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/val.csv', help='path to val dataset')
-parser.add_argument('--dataset-name', type=str, default='fmow-joint', choices=['fmow-rgb', 'fmow-multi', 'fmow-joint'], help='Name of the dataset')
+parser.add_argument('--train_data', metavar='DIR', default='/atlas/u/pliu1/housing_event_pred/data/fmow-csv/fmow-train.csv', help='path to train dataset')
+parser.add_argument('--val_data', metavar='DIR', default='/atlas/u/pliu1/housing_event_pred/data/fmow-csv/fmow-val.csv', help='path to val dataset')
+parser.add_argument('--dataset-name', type=str, default='fmow-rgb', choices=['fmow-rgb', 'fmow-multi', 'fmow-joint'], help='Name of the dataset')
 parser.add_argument('--dont-drop-bands', '-ddb', action='store_true')
-parser.add_argument('-a', '--arch', metavar='ARCH', default='sat_resnet50',
+parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                     choices=model_names,
                     help='model architecture: ' +
                         ' | '.join(model_names) +
-                        ' (default: sat_resnet50)')
+                        ' (default: resnet50)')
 parser.add_argument('-j', '--workers', default=16, type=int, metavar='N',
                     help='number of data loading workers (default: 32)')
 parser.add_argument('--epochs', default=90, type=int, metavar='N',
@@ -118,8 +118,6 @@ def main():
         raise ValueError("Cannot specify both fully supervised and pretrained to be true")
     
     if args.arch.startswith('vit'):
-        raise NotImplementedError
-    if args.dataset_name == 'fmow-rgb':
         raise NotImplementedError
         
     if args.evaluate and args.eval_model:
@@ -194,24 +192,19 @@ def main_worker(gpu, ngpus_per_node, args):
     if args.arch.startswith('vit'):
         model = vits.__dict__[args.arch]()
         hidden_dim = model.head.weight.shape[1]
-        #if args.dataset_name == 'fmow-multi':
-        #    output_dim = 62
-        #else:
-        #    raise NotImplementedError
         del model.head
         linear_keyword = 'head'
     elif args.arch.startswith('sat_resnet50'):
         model = resnet50()
         hidden_dim = model.fc.weight.shape[1]
-        #if args.dataset_name == 'fmow-multi':
-        #    output_dim = 62
-        #    num_bands = 13
-        #else:
-        #    raise NotImplementedError
-        if 'joint' in args.pretrained_id:
+        if 'joint' in args.dataset_name:
             num_bands = 16
-        else:
+        elif 'rgb' in args.dataset_name:
+            num_bands = 3
+        elif 'multi' in args.dataset_name:
             num_bands = 13
+        else:
+            raise NotImplementedError
         del model.fc, model.conv1
         model.fc = nn.Linear(hidden_dim, output_dim)
         model.conv1 = nn.Conv2d(num_bands, 64, kernel_size=3, stride=1, padding=1, bias=False)
@@ -219,10 +212,14 @@ def main_worker(gpu, ngpus_per_node, args):
     else:
         model = torchvision_models.__dict__[args.arch]()
         hidden_dim = model.fc.weight.shape[1]
-        if 'joint' in args.pretrained_id:
+        if 'joint' in args.dataset_name:
             num_bands = 16
-        else:
+        elif 'rgb' in args.dataset_name:
+            num_bands = 3
+        elif 'multi' in args.dataset_name:
             num_bands = 13
+        else:
+            raise NotImplementedError
         del model.fc, model.conv1
         model.fc = nn.Linear(hidden_dim, output_dim)
         model.conv1 = nn.Conv2d(num_bands, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
@@ -360,7 +357,39 @@ def main_worker(gpu, ngpus_per_node, args):
     # create augmentations
     # follow BYOL's augmentation recipe: https://arxiv.org/abs/2006.07733 
     # But use only those usable for multiband images and add some more
-    if args.dataset_name == 'fmow-multi':
+    if args.dataset_name == 'fmow-rgb':
+        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                    std=[0.229, 0.224, 0.225])              
+                                         
+        train_transforms = [
+            transforms.Resize(args.rgb_resize),
+            transforms.RandomResizedCrop(args.crop_size),
+            transforms.RandomApply([
+                transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
+            ], p=0.8),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.RandomApply([moco.loader.GaussianBlur([.1, 2.])], p=1.0),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomVerticalFlip(),   ## this is new we added
+            transforms.RandomRotation(90),     ## this is new we added
+            transforms.ToTensor(),
+            normalize,
+        ]
+        
+        val_transforms = [
+            transforms.Resize(args.rgb_resize),
+            transforms.CenterCrop(args.crop_size),
+            transforms.ToTensor(),
+            normalize,
+            
+        ]
+        
+        train_dataset = fMoWRGBDataset(traindir,
+                                        transforms=transforms.Compose(train_transforms))
+        
+        val_dataset = fMoWRGBDataset(valdir,
+                                    transforms=transforms.Compose(val_transforms))
+    elif args.dataset_name == 'fmow-multi':
         channel_stats = pickle.load(open('./fmow-multiband-log-stats.pkl', 'rb'))
         normalize = transforms.Normalize(mean=channel_stats['log_channel_means'],
                                             std=channel_stats['log_channel_stds'])
@@ -769,8 +798,6 @@ if __name__ == '__main__':
 
 ##################
 
-## TODO:
-
 ## python main_lincls.py --pretrained checkpoints/moco_sat_resnet50_lr=0.00015_bs=512_joint=either_ddb/checkpoint_0052.pth.tar --pretrained_id joint=either-ddb --joint-transform sentinel -ddb
 
 ## python main_lincls.py --pretrained checkpoints/moco_sat_resnet50_lr=0.00015_bs=512_joint=either_ddb/checkpoint_0052.pth.tar --pretrained_id joint=either-ddb --joint-transform rgb -ddb
@@ -787,13 +814,10 @@ if __name__ == '__main__':
 
 #-----------
 
-## python main_lincls.py --pretrained checkpoints/moco_sat_resnet50_lr=0.00015_bs=512_joint=drop_ddb/checkpoint_0052.pth.tar --pretrained_id joint=drop-ddb --joint-transform rgb -ddb --lr 1e-4
+## TODO:
 
-#------------
-#------------
+## python main_lincls.py --pretrained checkpoints/rgb_moco_resnet50_lr=0.00015_bs=256_r=224_rc=224/checkpoint_0059.pth.tar --pretrained_id rgb-cs=224 --rgb-resize 224 --crop-size 224 --arch resnet50 -b 512
 
-## python main_lincls.py --pretrained checkpoints/moco_sat_resnet50_lr=0.00015_bs=512_joint=drop_ddb/checkpoint_0052.pth.tar --pretrained_id joint=drop-ddb --joint-transform sentinel -ddb --lr 1e-4
-
-## python main_lincls.py --pretrained checkpoints/moco_sat_resnet50_lr=0.00015_bs=512_joint=drop_ddb/checkpoint_0052.pth.tar --pretrained_id joint=drop-ddb --joint-transform both -ddb --lr 1e-4
+## python main_lincls.py --pretrained checkpoints/rgb_moco_sat_resnet50_lr=0.00015_bs=512_r=224_rc=32/checkpoint_??.pth.tar --pretrained_id rgb-cs=224 --rgb-resize 224 --crop-size 32 --arch sat_resnet50
 
 

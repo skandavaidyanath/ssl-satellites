@@ -55,18 +55,18 @@ parser.add_argument('data', metavar='DIR', help='path to dataset')
 parser.add_argument('--dataset-name', type=str, help='Name of the dataset', default='fmow-joint', choices=['fmow-rgb', 'fmow-multi', 'fmow-joint'])
 parser.add_argument('--dont-drop-bands', '-ddb', action='store_true')
 parser.add_argument('--viewmaker', '-vm', action='store_true', help='Using viewmaker or not')
-parser.add_argument('-a', '--arch', metavar='ARCH', default='sat_resnet50',
+parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                     choices=model_names,
                     help='model architecture: ' +
                         ' | '.join(model_names) +
-                        ' (default: sat_resnet50)')
+                        ' (default: resnet50)')
 parser.add_argument('-j', '--workers', default=32, type=int, metavar='N',
                     help='number of data loading workers (default: 32)')
 parser.add_argument('--epochs', default=100, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-parser.add_argument('-b', '--batch-size', default=512, type=int,
+parser.add_argument('-b', '--batch-size', default=256, type=int,
                     metavar='N',
                     help='mini-batch size (default: 4096), this is the total '
                          'batch size of all GPUs on the current node when '
@@ -141,8 +141,6 @@ def main():
         raise NotImplementedError
     if args.viewmaker:
         raise NotImplementedError
-    if args.dataset_name == 'fmow-rgb':
-        raise NotImplementedError
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -203,7 +201,26 @@ def main_worker(gpu, ngpus_per_node, args):
     # create augmentations
     # follow BYOL's augmentation recipe: https://arxiv.org/abs/2006.07733 
     # But use only those usable for multiband images and add some more
-    if args.dataset_name == 'fmow-multi':
+    if args.dataset_name == 'fmow-rgb':
+        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                    std=[0.229, 0.224, 0.225])            
+                                         
+        augmentation = [
+            transforms.Resize(args.rgb_resize),
+            transforms.RandomResizedCrop(args.crop_size, scale=(args.crop_min, 1.)),
+            transforms.RandomApply([
+                transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
+            ], p=0.8),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.RandomApply([moco.loader.GaussianBlur([.1, 2.])], p=1.0),
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomVerticalFlip(),   ## this is new we added
+            transforms.RandomRotation(90),     ## this is new we added
+            transforms.ToTensor(),
+            normalize,
+        ]
+        
+    elif args.dataset_name == 'fmow-multi':
         channel_stats = pickle.load(open('./fmow-multiband-log-stats.pkl', 'rb'))
         normalize = transforms.Normalize(mean=channel_stats['log_channel_means'],
                                             std=channel_stats['log_channel_stds'])
@@ -283,7 +300,9 @@ def main_worker(gpu, ngpus_per_node, args):
         raise NotImplementedError
     
     # create model
-    if args.dataset_name == 'fmow-multi':
+    if args.dataset_name == 'fmow-rgb':
+        num_bands = 3
+    elif args.dataset_name == 'fmow-multi':
         num_bands = 13
     elif args.dataset_name == 'fmow-joint':
         num_bands = 16
@@ -305,9 +324,12 @@ def main_worker(gpu, ngpus_per_node, args):
     args.lr = args.lr * args.batch_size / 256
     
     ## Set up some housekeeping
-    logfile = f'moco_{args.arch}_lr={args.base_lr}_bs={args.batch_size}'
+    logfile = args.dataset_name.split('-')[-1]    ## rgb, sentinel or joint
+    logfile += f'_moco_{args.arch}_lr={args.base_lr}_bs={args.batch_size}'
     if args.dataset_name == 'fmow-joint':
         logfile += f'_joint={args.joint_transform}'
+    if args.dataset_name == 'fmow-rgb':
+        logfile += f'_r={args.rgb_resize}_rc={args.crop_size}'
     if args.dont_drop_bands:
         logfile += '_ddb'
     if args.viewmaker:
@@ -391,7 +413,10 @@ def main_worker(gpu, ngpus_per_node, args):
     # Data loading code
     traindir = args.data
    
-    if args.dataset_name == 'fmow-multi':
+    if args.dataset_name == 'fmow-rgb':
+        train_dataset = fMoWRGBDataset(traindir, transforms=moco.loader.TwoCropsTransform(transforms.Compose(augmentation), 
+                                  transforms.Compose(augmentation)))
+    elif args.dataset_name == 'fmow-multi':
         train_dataset = fMoWMultibandDataset(traindir, transforms=moco.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
                                   transforms.Compose(augmentation2)))
     elif args.dataset_name == 'fmow-joint':
@@ -563,5 +588,9 @@ if __name__ == '__main__':
 
 ## TODO:
 
-#python main_moco.py --dataset-name fmow-joint -ddb --joint-transform both --arch sat_resnet50 -p 10 --moco-m-cos --crop-min=.2 --multiprocessing-distributed --world-size 1 --rank 0 /atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/train.csv
+# python main_moco.py --dataset-name fmow-rgb --arch resnet50 -p 10 --moco-m-cos --crop-min=.2 --rgb-resize 224 --crop-size 224 --multiprocessing-distributed --world-size 1 --rank 0 /atlas/u/pliu1/housing_event_pred/data/fmow-csv/fmow-train.csv
+
+
+## try a higher batchsize
+#python main_moco.py --dataset-name fmow-rgb --arch sat_resnet50 -p 10 --moco-m-cos --crop-min=.2 --rgb-resize 224 --crop-size 32 --multiprocessing-distributed --world-size 1 --rank 0 /atlas/u/pliu1/housing_event_pred/data/fmow-csv/fmow-train.csv
 
