@@ -1,0 +1,71 @@
+DATA:
+  data_root: /atlas/u/kayush/winter2020/jigsaw/semseg/dataset/spacenet/list/
+  train_list: /atlas/u/kayush/winter2020/jigsaw/semseg/dataset/spacenet/list/training.txt
+  val_list: /atlas/u/kayush/winter2020/jigsaw/semseg/dataset/spacenet/list/validation.txt
+  classes: 2
+  pad_dataset: True
+
+TRAIN:
+  arch: psa
+  model_type: srs
+  num_bands: 16
+  layers: 50
+  sync_bn: True  # adopt sync_bn or not
+  resize: 50
+  train_h: 33
+  train_w: 33
+  scale_min: 0.5  # minimum random scale
+  scale_max: 2.0  # maximum random scale
+  rotate_min: -10  # minimum random rotate
+  rotate_max: 10  # maximum random rotate
+  zoom_factor: 8  # zoom factor for final prediction during training, be in [1, 2, 4, 8]
+  ignore_label: 255  ## no use in our code
+  aux_weight: 0.4
+  psa_type: 2 # 0-collect, 1-distribute, 2-bi-direction
+  compact: 0 # 0-no, 1-yes
+  shrink_factor: 2 # shrink factor when get attention mask
+  mask_h: # specify mask h or not
+  mask_w: # specify mask w or not
+  normalization_factor: 1.0 # normalization factor for aggregation
+  psa_softmax: 1 # softmax on mask or not: 0-no, 1-yes
+  train_gpu: [0, 1, 2, 3]
+  workers: 32  # data loader workers
+  batch_size: 256  # batch size for training
+  batch_size_val: 128  # batch size for validation during training, memory and speed tradeoff
+  base_lr: 0.0001
+  epochs: 100
+  start_epoch: 0
+  power: 0.9
+  weight_decay: 0.
+  manual_seed:
+  print_freq: 10
+  save_freq: 5
+  save_path: ## to be set in code
+  pretrained: checkpoints/joint_moco_sat_resnet50_lr=0.00015_bs=512_rgb-r=50_sentinel-r=50_rc=32_joint=either_ddb/checkpoint_0099.pth.tar # path to initial weight (default: none)
+  pretrained_id: joint-100
+  fully_supervised: False
+  finetune: False
+  resume:  # path to latest checkpoint (default: none)
+  evaluate: True  # evaluate on validation set, extra gpu memory needed and small batch_size_val is recommend
+Distributed:
+  dist_url: tcp://127.0.0.1:6789
+  dist_backend: 'nccl'
+  multiprocessing_distributed: True
+  world_size: 1
+  rank: 0
+
+# TEST:
+#   test_list: /atlas/u/kayush/winter2020/jigsaw/semseg/dataset/spacenet/list/validation.txt
+#   split: val  # split in [train, val and test]
+#   base_size: 512  # based size for scaling
+#   test_h: 401
+#   test_w: 401
+#   scales: [1.0]  # evaluation scales, ms as [0.5, 0.75, 1.0, 1.25, 1.5, 1.75]
+#   has_prediction: False  # has prediction already or not
+#   index_start: 0  # evaluation start index in list
+#   index_step: 0  # evaluation step index in list, 0 means to end
+#   test_gpu: [0]
+#   model_path: exp/spacenet/psanet50/model/train_epoch_100.pth  # evaluation model path
+#   save_folder: exp/spacenet/psanet50/result/epoch_100/val/ss  # results save folder
+#   colors_path: data/spacenet/spacenet_colors.txt  # path of dataset colors
+#   names_path: data/spacenet/spacenet_names.txt  # path of dataset category names

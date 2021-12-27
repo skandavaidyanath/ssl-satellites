@@ -10,6 +10,7 @@ import rasterio
 from rasterio.enums import Resampling
 import torch
 from tqdm import tqdm
+import cv2
 
 from torch.utils.data.dataset import Dataset
 from PIL import Image
@@ -19,6 +20,7 @@ from moco.loader import RandomDropBands
 Image.MAX_IMAGE_PIXELS = None
 warnings.simplefilter('ignore', Image.DecompressionBombWarning)
 #warnings.filterwarnings("ignore")
+
 
 class fMoWRGBDataset(Dataset):
     '''fMoW RGB Dataset'''
@@ -196,8 +198,10 @@ class fMoWJointDataset(Dataset):
         label = self.categories[category]
             
         return (joint_images, [sentinel_image_path, rgb_image_path], label)
+    
 
 
+###################### DEBUGGING ###############
 
 if __name__ == '__main__':
     

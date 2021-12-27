@@ -30,17 +30,18 @@ import torch.utils.data.distributed
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as torchvision_models
-from torch.utils.tensorboard import SummaryWriter
 from torchvision.transforms.transforms import RandomVerticalFlip
 import wandb
 
 import moco.builder
 import moco.loader
 import moco.optimizer
-from fmow_dataloader import fMoWMultibandDataset, fMoWRGBDataset, fMoWJointDataset
+from fmow_datasets import fMoWMultibandDataset, fMoWRGBDataset, fMoWJointDataset
 import viewmaker_moco
 import vits
-from moco.sat_resnet import resnet50
+from models.sat_resnet import resnet50
+
+## TODO: resume part isn't working?
 
 torchvision_model_names = sorted(name for name in torchvision_models.__dict__
     if name.islower() and not name.startswith("__")
@@ -66,7 +67,7 @@ parser.add_argument('--epochs', default=100, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-parser.add_argument('-b', '--batch-size', default=256, type=int,
+parser.add_argument('-b', '--batch-size', default=4096, type=int,
                     metavar='N',
                     help='mini-batch size (default: 4096), this is the total '
                          'batch size of all GPUs on the current node when '
@@ -139,6 +140,7 @@ def main():
 
     if args.arch.startswith('vit'):
         raise NotImplementedError
+        
     if args.viewmaker:
         raise NotImplementedError
 
@@ -314,7 +316,7 @@ def main_worker(gpu, ngpus_per_node, args):
             partial(vits.__dict__[args.arch], in_chans=num_bands, stop_grad_conv1=args.stop_grad_conv1), arch=args.arch, num_bands=num_bands, dim=args.moco_dim, mlp_dim=args.moco_mlp_dim, T=args.moco_t)
     elif args.arch == 'sat_resnet50':
         model = moco.builder.MoCo_ResNet(
-            moco.sat_resnet.resnet50, arch=args.arch, num_bands=num_bands, dim=args.moco_dim, mlp_dim=args.moco_mlp_dim, T=args.moco_t)
+            resnet50, arch=args.arch, num_bands=num_bands, dim=args.moco_dim, mlp_dim=args.moco_mlp_dim, T=args.moco_t)
     else:
         model = moco.builder.MoCo_ResNet(
             partial(torchvision_models.__dict__[args.arch], zero_init_residual=True), arch=args.arch, num_bands=num_bands, dim=args.moco_dim, mlp_dim=args.moco_mlp_dim, T=args.moco_t)
@@ -327,6 +329,7 @@ def main_worker(gpu, ngpus_per_node, args):
     logfile = args.dataset_name.split('-')[-1]    ## rgb, sentinel or joint
     logfile += f'_moco_{args.arch}_lr={args.base_lr}_bs={args.batch_size}'
     if args.dataset_name == 'fmow-joint':
+        logfile += f'_rgb-r={args.rgb_resize}_sentinel-r={args.sentinel_resize}_rc={args.crop_size}'
         logfile += f'_joint={args.joint_transform}'
     if args.dataset_name == 'fmow-rgb':
         logfile += f'_r={args.rgb_resize}_rc={args.crop_size}'
@@ -335,9 +338,7 @@ def main_worker(gpu, ngpus_per_node, args):
     if args.viewmaker:
         logfile += '_vm'
     if not os.path.isdir(f'checkpoints/{logfile}/'):
-        os.makedirs(f'checkpoints/{logfile}/')
-    if not os.path.isdir(f'runs/{logfile}'):
-        os.makedirs(f'runs/{logfile}/')
+        os.makedirs(f'checkpoints/{logfile}/', exist_ok=True)
 
     if not torch.cuda.is_available():
         print('using CPU, this will be slow')
@@ -381,7 +382,6 @@ def main_worker(gpu, ngpus_per_node, args):
                                 weight_decay=args.weight_decay)
         
     scaler = torch.cuda.amp.GradScaler()
-    summary_writer = SummaryWriter(log_dir=f'runs/{logfile}/') if args.rank == 0 else None
     if args.rank == 0:
         wandb.init(
             name=logfile,
@@ -420,7 +420,7 @@ def main_worker(gpu, ngpus_per_node, args):
         train_dataset = fMoWMultibandDataset(traindir, transforms=moco.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
                                   transforms.Compose(augmentation2)))
     elif args.dataset_name == 'fmow-joint':
-        train_dataset = train_dataset = fMoWJointDataset(traindir,
+        train_dataset = fMoWJointDataset(traindir,
                                         sentinel_transforms=moco.loader.TwoCropsTransform(transforms.Compose(sentinel_transforms), 
                                                                               transforms.Compose(sentinel_transforms)),
                                         rgb_transforms=moco.loader.TwoCropsTransform(transforms.Compose(rgb_transforms),
@@ -428,6 +428,8 @@ def main_worker(gpu, ngpus_per_node, args):
                                         joint_transform=args.joint_transform)
     else:
         raise NotImplementedError
+        
+    print('==> Dataset ready!')
     
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
@@ -437,13 +439,15 @@ def main_worker(gpu, ngpus_per_node, args):
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
         num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
+    
+    print('==> Dataloader ready!')
 
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
 
         # train for one epoch
-        train(train_loader, model, optimizer, scaler, summary_writer, epoch, args)
+        train(train_loader, model, optimizer, scaler, epoch, args)
 
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                 and args.rank == 0): # only the first GPU saves checkpoint
@@ -455,10 +459,8 @@ def main_worker(gpu, ngpus_per_node, args):
                 'scaler': scaler.state_dict(),
             }, is_best=False, filename=f'checkpoints/{logfile}/checkpoint_%04d.pth.tar' % epoch)
 
-    if args.rank == 0:
-        summary_writer.close()
 
-def train(train_loader, model, optimizer, scaler, summary_writer, epoch, args):
+def train(train_loader, model, optimizer, scaler, epoch, args):
     
     ## This is set for without Viewmaker
 
@@ -501,7 +503,6 @@ def train(train_loader, model, optimizer, scaler, summary_writer, epoch, args):
 
         losses.update(loss.item(), images[0].size(0))
         if args.rank == 0:
-            summary_writer.add_scalar("loss", loss.item(), epoch * iters_per_epoch + i)
             wandb.log({"loss": loss.item()})
 
         # compute gradient and do SGD step
@@ -520,9 +521,6 @@ def train(train_loader, model, optimizer, scaler, summary_writer, epoch, args):
 
 def save_checkpoint(state, is_best, filename='checkpoints/checkpoint.pth.tar'):
     torch.save(state, filename)
-    if is_best:
-        shutil.copyfile(filename, 'model_best.pth.tar')
-
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
@@ -588,9 +586,6 @@ if __name__ == '__main__':
 
 ## TODO:
 
-# python main_moco.py --dataset-name fmow-rgb --arch resnet50 -p 10 --moco-m-cos --crop-min=.2 --rgb-resize 224 --crop-size 224 --multiprocessing-distributed --world-size 1 --rank 0 /atlas/u/pliu1/housing_event_pred/data/fmow-csv/fmow-train.csv
+# python main_moco.py --dataset-name fmow-joint --arch sat_resnet50 -ddb -b 512 -p 10 --moco-m-cos --crop-min=.2 --multiprocessing-distributed --world-size 1 --rank 0 --rgb-resize 50 --sentinel-resize 50 --crop-size 32 --epochs 200 --joint-transform either /atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/train.csv
 
-
-## try a higher batchsize
-#python main_moco.py --dataset-name fmow-rgb --arch sat_resnet50 -p 10 --moco-m-cos --crop-min=.2 --rgb-resize 224 --crop-size 32 --multiprocessing-distributed --world-size 1 --rank 0 /atlas/u/pliu1/housing_event_pred/data/fmow-csv/fmow-train.csv
 

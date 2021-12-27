@@ -8,6 +8,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+### Smaller version of ResNet works well for 32 x 32 inputs
+
+
 class BasicBlock(nn.Module):
     expansion = 1
 

@@ -1,22 +1,14 @@
 #!/usr/bin/env python
-
-# Copyright (c) Facebook, Inc. and its affiliates.
-# All rights reserved.
-
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
-
+# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 import argparse
 import builtins
-import math
 import os
 import random
 import shutil
 import time
 import warnings
-import pickle
+import math
 import wandb
-import numpy as np
 
 import torch
 import torch.nn as nn
@@ -28,44 +20,47 @@ import torch.multiprocessing as mp
 import torch.utils.data
 import torch.utils.data.distributed
 import torchvision.transforms as transforms
-import torchvision.datasets as datasets
-import torchvision.models as torchvision_models
 
-import vits
-from fmow_datasets import fMoWMultibandDataset, fMoWRGBDataset, fMoWJointDataset
-import moco.loader
+from landcover_datasets import RandomFlipAndRotateSinglePatch
+from landcover_datasets import ClipAndScaleSinglePatch, ToFloatTensorSinglePatch
+from landcover_datasets import PatchDataset
+from sklearn.preprocessing import LabelEncoder
+import numpy as np
+
 from models.sat_resnet import resnet50
 
-torchvision_model_names = sorted(name for name in torchvision_models.__dict__
-    if name.islower() and not name.startswith("__")
-    and callable(torchvision_models.__dict__[name]))
+import torchvision 
 
-model_names = ['vit_small', 'vit_base', 'vit_conv_small', 'vit_conv_base'] + ['sat_resnet50'] + torchvision_model_names
+model_names = sorted(name for name in torchvision.models.__dict__
+                     if name.islower() and not name.startswith("__")
+                     and callable(torchvision.models.__dict__[name])) + ['vit_small', 'vit_base', 'vit_conv_small', 'vit_conv_base'] + ['sat_resnet50']
 
-parser = argparse.ArgumentParser(description='MoCo Finetuning')
-parser.add_argument('--train_data', metavar='DIR', default='/atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/train.csv', help='path to train dataset')
-parser.add_argument('--val_data', metavar='DIR', default='/atlas/u/pliu1/housing_event_pred/data/fmow-sentinel-filtered-csv/val.csv', help='path to val dataset')
-parser.add_argument('--dataset-name', type=str, default='fmow-joint', choices=['fmow-rgb', 'fmow-multi', 'fmow-joint'], help='Name of the dataset')
-parser.add_argument('--dont-drop-bands', '-ddb', action='store_true')
+parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
+parser.add_argument('--dataset-name', type=str, default='naip', help='dataset name')
+parser.add_argument('--tile-dir', type=str, default='/atlas/u/kayush/pix2vec/supervised_50_100/', help='path to tile dir')
+parser.add_argument('--split-fn', type=str, default='/atlas/u/kayush/pix2vec/splits.npy', help='path to dataset')
+parser.add_argument('--y-fn', type=str, default='/atlas/u/kayush/pix2vec/y_50_100.npy', help='path to labels')
+parser.add_argument('--pad-data', type=bool, default=True, help='Pad data to 16 bands?')
 parser.add_argument('-a', '--arch', metavar='ARCH', default='sat_resnet50',
                     choices=model_names,
                     help='model architecture: ' +
-                        ' | '.join(model_names) +
-                        ' (default: sat_resnet50)')
-parser.add_argument('-j', '--workers', default=16, type=int, metavar='N',
-                    help='number of data loading workers (default: 32)')
+                    ' | '.join(model_names) +
+                    ' (default: sat_resnet50)')
+parser.add_argument('-j', '--workers', default=20, type=int, metavar='N',
+                    help='number of data loading workers (default: 20)')
 parser.add_argument('--epochs', default=100, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
 parser.add_argument('-b', '--batch-size', default=1024, type=int,
                     metavar='N',
-                    help='mini-batch size (default: 1024), this is the total '
+                    help='mini-batch size (default: 256), this is the total '
                          'batch size of all GPUs on the current node when '
                          'using Data Parallel or Distributed Data Parallel')
 parser.add_argument('--lr', '--learning-rate', default=1e-3, type=float,
-                    metavar='LR', help='initial (base) learning rate', dest='lr')
-# parser.add_argument('--momentum', default=0.9, type=float, metavar='M', help='momentum')  ## not using this because we're switching from SGD to Adam
+                    metavar='LR', help='initial learning rate', dest='lr')
+parser.add_argument('--schedule', default=[60, 80], nargs='*', type=int,
+                    help='learning rate schedule (when to drop lr by a ratio)')
 parser.add_argument('--wd', '--weight-decay', default=0., type=float,
                     metavar='W', help='weight decay (default: 0.)',
                     dest='weight_decay')
@@ -79,7 +74,7 @@ parser.add_argument('--world-size', default=-1, type=int,
                     help='number of nodes for distributed training')
 parser.add_argument('--rank', default=-1, type=int,
                     help='node rank for distributed training')
-parser.add_argument('--dist-url', default='tcp://127.0.0.1:12345', type=str,
+parser.add_argument('--dist-url', default='tcp://224.66.41.62:23456', type=str,
                     help='url used to set up distributed training')
 parser.add_argument('--dist-backend', default='nccl', type=str,
                     help='distributed backend')
@@ -92,26 +87,19 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'N processes per node, which has N GPUs. This is the '
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
+parser.add_argument('--cos', action='store_true', help='use cosine lr schedule')
 
-# additional configs:
-parser.add_argument('--pretrained', default='', type=str,
-                    help='path to moco pretrained checkpoint')
-parser.add_argument('--pretrained_id', default='', type=str,
-                    help='an id for the pretrained model you loaded useful for logging')
+parser.add_argument('--pretrained', default='checkpoints/joint_moco_sat_resnet50_lr=0.00015_bs=512_rgb-r=50_sentinel-r=50_rc=32_joint=either_ddb/checkpoint_0099.pth.tar', type=str, help='path to moco pretrained checkpoint')
+parser.add_argument('--pretrained-id', default='joint-100', type=str, help='Pretrained ID')
 parser.add_argument('--eval_model', default='', type=str, help='path to eval model')
 parser.add_argument('--fully-supervised', '-fs', action='store_true',
                     help='train a fully supervised model from scratch')
 parser.add_argument('--finetune', '-ft', action='store_true',
                     help='load the weights and finetune')
+#parser.add_argument('--resize', type=int, default=32, help='Resize image to (r,r)')
 
-## augmentation configs
-parser.add_argument('--sentinel-resize', default=50, type=int)
-parser.add_argument('--rgb-resize', default=224, type=int)
-parser.add_argument('--crop-size', default=32, type=int)
-parser.add_argument('--joint-transform', default='sentinel', choices=['rgb', 'sentinel', 'both', 'drop'], type=str)
 
 best_acc1 = 0
-
 
 def main():
     args = parser.parse_args()
@@ -130,7 +118,6 @@ def main():
         np.random.seed(SEED)
         random.seed(SEED)
         torch.manual_seed(SEED)
-        
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -158,7 +145,8 @@ def main():
         args.world_size = ngpus_per_node * args.world_size
         # Use torch.multiprocessing.spawn to launch distributed processes: the
         # main_worker process function
-        mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args))
+        mp.spawn(main_worker, nprocs=ngpus_per_node,
+                 args=(ngpus_per_node, args))
     else:
         # Simply call main_worker function
         main_worker(args.gpu, ngpus_per_node, args)
@@ -186,12 +174,12 @@ def main_worker(gpu, ngpus_per_node, args):
             args.rank = args.rank * ngpus_per_node + gpu
         dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
                                 world_size=args.world_size, rank=args.rank)
-        torch.distributed.barrier()
     # create model
     print("=> creating model '{}'".format(args.arch))
+
     ### UPDATE THE FINAL LAYER AND CHANGE IT TO WHAT WE NEED. 62 CLASSES NOT 1000
-    if 'fmow' in args.dataset_name:
-        output_dim = 62
+    if 'naip' in args.dataset_name:
+        output_dim = 66
     else:
         raise NotImplementedError
     if args.arch.startswith('vit'):
@@ -202,14 +190,10 @@ def main_worker(gpu, ngpus_per_node, args):
     elif args.arch.startswith('sat_resnet50'):
         model = resnet50()
         hidden_dim = model.fc.weight.shape[1]
-        if 'joint' in args.dataset_name:
+        if args.pad_data:
             num_bands = 16
-        elif 'rgb' in args.dataset_name:
-            num_bands = 3
-        elif 'multi' in args.dataset_name:
-            num_bands = 13
         else:
-            raise NotImplementedError
+            num_bands = 3
         del model.fc, model.conv1
         model.fc = nn.Linear(hidden_dim, output_dim)
         model.conv1 = nn.Conv2d(num_bands, 64, kernel_size=3, stride=1, padding=1, bias=False)
@@ -217,25 +201,22 @@ def main_worker(gpu, ngpus_per_node, args):
     else:
         model = torchvision_models.__dict__[args.arch]()
         hidden_dim = model.fc.weight.shape[1]
-        if 'joint' in args.dataset_name:
+        if args.pad_data:
             num_bands = 16
-        elif 'rgb' in args.dataset_name:
-            num_bands = 3
-        elif 'multi' in args.dataset_name:
-            num_bands = 13
         else:
-            raise NotImplementedError
+            num_bands = 3
         del model.fc, model.conv1
         model.fc = nn.Linear(hidden_dim, output_dim)
         model.conv1 = nn.Conv2d(num_bands, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
         linear_keyword = 'fc'
-    
+        
     if not (args.fully_supervised or args.finetune):
         ## this will happen for eval models also but thats fine
         for name, param in model.named_parameters():
             if name not in ['%s.weight' % linear_keyword, '%s.bias' % linear_keyword]:
                 param.requires_grad = False
     # init the fc layer
+    ## this will happen for eval models also but thats fine
     getattr(model, linear_keyword).weight.data.normal_(mean=0.0, std=0.01)
     getattr(model, linear_keyword).bias.data.zero_()
         
@@ -256,7 +237,6 @@ def main_worker(gpu, ngpus_per_node, args):
             print("=> loaded eval model '{}'".format(args.eval_model))
         else:
             print("=> no checkpoint found at '{}'".format(args.eval_model))
-        
 
     # load from pre-trained, before DistributedDataParallel constructor
     if args.pretrained:
@@ -281,13 +261,11 @@ def main_worker(gpu, ngpus_per_node, args):
             print("=> loaded pre-trained model '{}'".format(args.pretrained))
         else:
             print("=> no checkpoint found at '{}'".format(args.pretrained))
-
+            
     # infer learning rate before changing batch size
     init_lr = args.lr * args.batch_size / 256
 
-    if not torch.cuda.is_available():
-        print('using CPU, this will be slow')
-    elif args.distributed:
+    if args.distributed:
         # For multiprocessing distributed, DistributedDataParallel constructor
         # should always set the single device scope, otherwise,
         # DistributedDataParallel will use all available devices.
@@ -298,8 +276,10 @@ def main_worker(gpu, ngpus_per_node, args):
             # DistributedDataParallel, we need to divide the batch size
             # ourselves based on the total number of GPUs we have
             args.batch_size = int(args.batch_size / ngpus_per_node)
-            args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
-            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+            args.workers = int(
+                (args.workers + ngpus_per_node - 1) / ngpus_per_node)
+            model = torch.nn.parallel.DistributedDataParallel(
+                model, device_ids=[args.gpu])
         else:
             model.cuda()
             # DistributedDataParallel will divide and allocate batch_size to all
@@ -324,10 +304,7 @@ def main_worker(gpu, ngpus_per_node, args):
     if not (args.fully_supervised or args.finetune):
         ## this also includes the eval case but thats fine
         assert len(parameters) == 2  # weight, bias
-
-    #optimizer = torch.optim.SGD(parameters, init_lr,
-    #                            momentum=args.momentum,
-    #                            weight_decay=args.weight_decay)
+    
     optimizer = torch.optim.Adam(parameters, init_lr,
                                 weight_decay=args.weight_decay)
 
@@ -355,170 +332,77 @@ def main_worker(gpu, ngpus_per_node, args):
 
     cudnn.benchmark = True
 
-    # Data loading code
-    traindir = args.train_data
-    valdir = args.val_data
-        
-    # create augmentations
-    # follow BYOL's augmentation recipe: https://arxiv.org/abs/2006.07733 
-    # But use only those usable for multiband images and add some more
-    if args.dataset_name == 'fmow-rgb':
-        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                    std=[0.229, 0.224, 0.225])              
-                                         
-        train_transforms = [
-            transforms.Resize(args.rgb_resize),
-            transforms.RandomResizedCrop(args.crop_size),
-            transforms.RandomApply([
-                transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
-            ], p=0.8),
-            transforms.RandomGrayscale(p=0.2),
-            transforms.RandomApply([moco.loader.GaussianBlur([.1, 2.])], p=1.0),
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomVerticalFlip(),   ## this is new we added
-            transforms.RandomRotation(90),     ## this is new we added
-            transforms.ToTensor(),
-            normalize,
-        ]
-        
-        val_transforms = [
-            transforms.Resize(args.rgb_resize),
-            transforms.CenterCrop(args.crop_size),
-            transforms.ToTensor(),
-            normalize,
-            
-        ]
-        
-        train_dataset = fMoWRGBDataset(traindir,
-                                        transforms=transforms.Compose(train_transforms))
-        
-        val_dataset = fMoWRGBDataset(valdir,
-                                    transforms=transforms.Compose(val_transforms))
-    elif args.dataset_name == 'fmow-multi':
-        channel_stats = pickle.load(open('./fmow-multiband-log-stats.pkl', 'rb'))
-        normalize = transforms.Normalize(mean=channel_stats['log_channel_means'],
-                                            std=channel_stats['log_channel_stds'])
-        
-        train_augmentations = [
-            transforms.Resize(args.sentinel_resize),         
-            transforms.RandomResizedCrop(args.crop_size),
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomVerticalFlip(),   ## this is new we added
-            transforms.RandomRotation(90),     ## this is new we added
-            moco.loader.LogTransform(epsilon=1.),  ## this is new we added
-            normalize,
-            moco.loader.RandomDropBands()  ## this is new we added
-        ]
-        
-        val_augmentations = [
-            transforms.Resize(args.sentinel_resize),         
-            transforms.CenterCrop(args.crop_size),
-            moco.loader.LogTransform(epsilon=1.),  ## this is new we added
-            normalize,
-            moco.loader.RandomDropBands()  ## this is new we added
-        ]
+    mean = [0.485, 0.456, 0.406]
+    std = [0.229, 0.224, 0.225]
 
-        if args.dont_drop_bands:
-            train_augmentations = train_augmentations[:-1]
-            val_augmentations = val_augmentations[:-1]
-        train_dataset = fMoWMultibandDataset(traindir, 
-                                            transforms.Compose(
-                                                train_augmentations
-                                            ))
-        val_dataset = fMoWMultibandDataset(valdir, 
-                                            transforms.Compose(
-                                                val_augmentations
-                                            ))
-    
-    elif args.dataset_name == 'fmow-joint':
-        rgb_normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                    std=[0.229, 0.224, 0.225])
-        channel_stats = pickle.load(open('./fmow-multiband-log-stats.pkl', 'rb'))
-        sentinel_normalize = transforms.Normalize(mean=channel_stats['log_channel_means'],
-                                            std=channel_stats['log_channel_stds'])                   
-                                         
-        rgb_train_transforms = [
-            transforms.Resize(args.rgb_resize),
-            transforms.RandomResizedCrop(args.crop_size),
-            transforms.RandomApply([
-                transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
-            ], p=0.8),
-            transforms.RandomGrayscale(p=0.2),
-            transforms.RandomApply([moco.loader.GaussianBlur([.1, 2.])], p=1.0),
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomVerticalFlip(),   ## this is new we added
-            transforms.RandomRotation(90),     ## this is new we added
-            transforms.ToTensor(),
-            rgb_normalize,
-        ]
-        
-        rgb_val_transforms = [
-            transforms.Resize(args.rgb_resize),
-            transforms.CenterCrop(args.crop_size),
-            transforms.ToTensor(),
-            rgb_normalize,
-            
-        ]
-        
-        sentinel_train_transforms = [
-            transforms.Resize(args.sentinel_resize),         
-            transforms.RandomResizedCrop(args.crop_size),
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomVerticalFlip(),   ## this is new we added
-            transforms.RandomRotation(90),     ## this is new we added
-            moco.loader.LogTransform(epsilon=1.),  ## this is new we added
-            sentinel_normalize,
-            moco.loader.RandomDropBands()  ## this is new we added
-        ]
-        
-        sentinel_val_transforms = [
-            transforms.Resize(args.sentinel_resize),         
-            transforms.CenterCrop(args.crop_size),
-            moco.loader.LogTransform(epsilon=1.),  ## this is new we added
-            sentinel_normalize,
-            moco.loader.RandomDropBands()  ## this is new we added
-        ]
-        
-        
-        if args.dont_drop_bands:
-            sentinel_train_transforms = sentinel_train_transforms[:-1]
-            sentinel_val_transforms = sentinel_val_transforms[:-1]
-            
-        train_dataset = fMoWJointDataset(traindir,
-                                        sentinel_transforms=transforms.Compose(sentinel_train_transforms),
-                                        rgb_transforms=transforms.Compose(rgb_train_transforms),
-                                        joint_transform=args.joint_transform)
-        
-        val_dataset = fMoWJointDataset(valdir,
-                                        sentinel_transforms=transforms.Compose(sentinel_val_transforms), 
-                                        rgb_transforms=transforms.Compose(rgb_val_transforms),
-                                        joint_transform=args.joint_transform)
-        
-    else:
-        raise NotImplementedError
-    
+    ################# Land Cover Classification ################
+    # Data
+    print('==> Prepping data...')
+    tile_dir = args.tile_dir
+    y_fn = args.y_fn
+    splits_fn = args.split_fn
+
+    transform_tr = transforms.Compose([
+        #transforms.Resize((args.resize,args.resize)),  ## Maybe we need to resize, ignoring for now
+        ClipAndScaleSinglePatch('naip'),
+        RandomFlipAndRotateSinglePatch(),
+        ToFloatTensorSinglePatch(),
+        transforms.Normalize(mean, std)   ## we added this
+    ])
+    transform_val = transforms.Compose([
+        #transforms.Resize((args.resize,args.resize)),
+        ClipAndScaleSinglePatch('naip'),
+        ToFloatTensorSinglePatch(),
+        transforms.Normalize(mean, std)   ## we added this
+    ])
+    transform_te = transforms.Compose([
+        #transforms.Resize((args.resize,args.resize)),
+        ClipAndScaleSinglePatch('naip'),
+        ToFloatTensorSinglePatch(),
+        transforms.Normalize(mean, std)   ## we added this
+    ])
+
+    # Encode labels
+    y = np.load(y_fn)
+    le = LabelEncoder()
+    le.fit(y)
+    n_classes = len(le.classes_)
+    labels = le.transform(y)
+
+    # Getting train/val/test idxs
+    splits = np.load(splits_fn)
+    idxs_tr = np.where(splits == 0)[0]
+    idxs_val = np.where(splits == 1)[0]
+    idxs_te = np.where(splits == 2)[0]
+
+    idxs_te = np.concatenate((idxs_val, idxs_te))
+
+    # Setting up Datasets
+    train_dataset = PatchDataset(tile_dir, idxs_tr, labels=labels, transform=transform_tr, pad_data=args.pad_data)
+    # valset = PatchDataset(tile_dir, idxs_val, labels=labels, transform=transform_val)
+    test_dataset = PatchDataset(tile_dir, idxs_te, labels=labels, transform=transform_te, pad_data=args.pad_data)
+
+
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
     else:
         train_sampler = None
 
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
         num_workers=args.workers, pin_memory=True, sampler=train_sampler)
 
-    val_loader = torch.utils.data.DataLoader(
-        val_dataset, batch_size=256, shuffle=False, num_workers=args.workers, pin_memory=True)
+
+    ############### Land Cover ##############
+    val_loader = torch.utils.data.DataLoader(test_dataset,batch_size=args.batch_size, shuffle=False,
+        num_workers=args.workers, pin_memory=True)
+    ##########################################
 
     if args.evaluate:
         validate(val_loader, model, criterion, args)
         return
     
     ## Set up some housekeeping
-    logfile = f'mocolincls_lr={args.lr}_bs={args.batch_size}'
-    if args.dataset_name == 'fmow-joint':
-        logfile += f'_joint={args.joint_transform}'
-    if args.dont_drop_bands:
-        logfile += '_ddb'
+    logfile = f'mocolandcover_lr={args.lr}_bs={args.batch_size}'
     if args.pretrained:
         logfile += f'_pt={args.pretrained_id}'
     if args.fully_supervised:
@@ -540,26 +424,27 @@ def main_worker(gpu, ngpus_per_node, args):
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
-        adjust_learning_rate(optimizer, init_lr, epoch, args)
+        adjust_learning_rate(optimizer, epoch, args)
 
         # train for one epoch
         loss, train_acc1, train_acc5 = train(train_loader, model, criterion, optimizer, epoch, args)
 
         # evaluate on validation set
-        acc1, acc5 = validate(val_loader, model, criterion, args)
+        acc1, acc5 = validate(val_loader, model, criterion, args, epoch)
 
         # remember best acc@1 and save checkpoint
         is_best = acc1 > best_acc1
         best_acc1 = max(acc1, best_acc1)
 
-        if not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank == 0): # only the first GPU saves checkpoint
-            save_checkpoint({
-                'epoch': epoch + 1,
-                'arch': args.arch,
-                'state_dict': model.state_dict(),
-                'best_acc1': best_acc1,
-                'optimizer' : optimizer.state_dict(),
-            }, is_best, filename=f'checkpoints/{logfile}/checkpoint_%04d.pth.tar' % epoch)
+        if not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank == 0):
+            if epoch % 10 == 0 or epoch == args.epochs - 1:
+                save_checkpoint({
+                    'epoch': epoch + 1,
+                    'arch': args.arch,
+                    'state_dict': model.state_dict(),
+                    'best_acc1': best_acc1,
+                    'optimizer': optimizer.state_dict(),
+                }, is_best, filename=f'checkpoints/{logfile}/checkpoint_%04d.pth.tar' % epoch)
             if args.pretrained and epoch == args.start_epoch and not (args.fully_supervised or args.finetune):
                 sanity_check(model.state_dict(), args.pretrained, linear_keyword)
             wandb.log({"training/loss": loss, "training/acc1": train_acc1, "training/acc5": train_acc5, "val/acc1": acc1, "val/acc5": acc5})
@@ -587,18 +472,16 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         model.eval()
 
     end = time.time()
-    for i, (images, _, target) in enumerate(train_loader):
+    for i, (images, target) in enumerate(train_loader):
         # measure data loading time
         data_time.update(time.time() - end)
 
         if args.gpu is not None:
             images = images.cuda(args.gpu, non_blocking=True)
-        if torch.cuda.is_available():
-            target = target.cuda(args.gpu, non_blocking=True)
+        target = target.cuda(args.gpu, non_blocking=True)
 
         # compute output
         output = model(images)
-        
         loss = criterion(output, target)
 
         # measure accuracy and record loss
@@ -606,10 +489,6 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         losses.update(loss.item(), images.size(0))
         top1.update(acc1[0], images.size(0))
         top5.update(acc5[0], images.size(0))
-        
-        ## per class accuracy
-        #TODO NEED A PROGRESS METER THING HERE
-        #per_class_acc = per_class_accuracy(output, target)
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -626,7 +505,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
     return losses.avg, top1.avg, top5.avg
 
 
-def validate(val_loader, model, criterion, args):
+def validate(val_loader, model, criterion, args, epoch=-1):
     batch_time = AverageMeter('Time', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
     top1 = AverageMeter('Acc@1', ':6.2f')
@@ -641,11 +520,10 @@ def validate(val_loader, model, criterion, args):
 
     with torch.no_grad():
         end = time.time()
-        for i, (images, _, target) in enumerate(val_loader):
+        for i, (images, target) in enumerate(val_loader):
             if args.gpu is not None:
                 images = images.cuda(args.gpu, non_blocking=True)
-            if torch.cuda.is_available():
-                target = target.cuda(args.gpu, non_blocking=True)
+            target = target.cuda(args.gpu, non_blocking=True)
 
             # compute output
             output = model(images)
@@ -656,10 +534,6 @@ def validate(val_loader, model, criterion, args):
             losses.update(loss.item(), images.size(0))
             top1.update(acc1[0], images.size(0))
             top5.update(acc5[0], images.size(0))
-            
-            ## per class accuracy
-            #TODO NEED A PROGRESS METER THING HERE
-            #per_class_acc = per_class_accuracy(output, target)
 
             # measure elapsed time
             batch_time.update(time.time() - end)
@@ -705,6 +579,7 @@ def sanity_check(state_dict, pretrained_weights, linear_keyword):
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
+
     def __init__(self, name, fmt=':f'):
         self.name = name
         self.fmt = fmt
@@ -744,11 +619,16 @@ class ProgressMeter(object):
         return '[' + fmt + '/' + fmt.format(num_batches) + ']'
 
 
-def adjust_learning_rate(optimizer, init_lr, epoch, args):
+def adjust_learning_rate(optimizer, epoch, args):
     """Decay the learning rate based on schedule"""
-    cur_lr = init_lr * 0.5 * (1. + math.cos(math.pi * epoch / args.epochs))
+    lr = args.lr
+    if args.cos:  # cosine lr schedule
+        lr *= 0.5 * (1. + math.cos(math.pi * epoch / args.epochs))
+    else:  # stepwise lr schedule
+        for milestone in args.schedule:
+            lr *= 0.1 if epoch >= milestone else 1.
     for param_group in optimizer.param_groups:
-        param_group['lr'] = cur_lr
+        param_group['lr'] = lr
 
 
 def accuracy(output, target, topk=(1,)):
@@ -766,67 +646,7 @@ def accuracy(output, target, topk=(1,)):
             correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
-    
-    
-def per_class_accuracy(outputs, classes):
-    nb_classes = 62
-    confusion_matrix = torch.zeros(nb_classes, nb_classes)
-    with torch.no_grad():
-        _, preds = torch.max(outputs, 1)
-        for t, p in zip(classes.view(-1), preds.view(-1)):
-            confusion_matrix[t.long(), p.long()] += 1
-    
-    return confusion_matrix.diag()/confusion_matrix.sum(1)
 
 
 if __name__ == '__main__':
     main()
-
-    
-## python main_lincls.py --pretrained checkpoints/moco_resnet50_lr=0.00015_adamw_warmup=10_bs=4096/checkpoint_0019.pth.tar --pretrained_id bs=4096
-
-## python main_lincls.py --pretrained checkpoints/moco_resnet50_lr=0.00015_adamw_warmup=10_bs=4096_ddb/checkpoint_0013.pth.tar -ddb --pretrained_id ddb
-
-## python main_lincls.py --eval_model checkpoints/mocolincls_lr=0.01_bs=1024_ddb_fs/checkpoint_0010.pth.tar -e
-
-## python main_lincls.py --eval_model checkpoints/mocolincls_lr=0.001_bs=1024_ddb_pt=ddb/checkpoint_0010.pth.tar -e
-
-## python main_lincls.py --eval_model checkpoints/mocolincls_lr=0.001_bs=1024_ddb/checkpoint_0010.pth.tar -e
-
-## python main_lincls.py --eval_model checkpoints/mocolincls_lr=0.001_bs=1024_ddb_pt=bs=4096/checkpoint_0010.pth.tar -e
-
-###################
-
-## python main_lincls.py --pretrained checkpoints/moco_sat_resnet50_lr=0.00015_adamw_warmup=10_bs=1024_resize=50_cropsize=32/checkpoint_0031.pth.tar --pretrained_id sat_bs=1024_r=50_rc=32 --resize 50 --crop-size 32
-
-## python main_lincls.py --pretrained checkpoints/moco_resnet50_lr=0.00015_adamw_warmup=10_bs=4096_resize=80_cropsize=64/checkpoint_0029.pth.tar --pretrained_id bs=4096_r=80_rc=64 --resize 80 --crop-size 64
-
-##################
-
-## python main_lincls.py --pretrained checkpoints/moco_sat_resnet50_lr=0.00015_bs=512_joint=either_ddb/checkpoint_0052.pth.tar --pretrained_id joint=either-ddb --joint-transform sentinel -ddb
-
-## python main_lincls.py --pretrained checkpoints/moco_sat_resnet50_lr=0.00015_bs=512_joint=either_ddb/checkpoint_0052.pth.tar --pretrained_id joint=either-ddb --joint-transform rgb -ddb
-
-## python main_lincls.py --pretrained checkpoints/moco_sat_resnet50_lr=0.00015_bs=512_joint=either_ddb/checkpoint_0052.pth.tar --pretrained_id joint=either-ddb --joint-transform both -ddb
-
-#------------
-
-## python main_lincls.py --pretrained checkpoints/moco_sat_resnet50_lr=0.00015_bs=512_joint=either/checkpoint_0077.pth.tar --pretrained_id joint=either --joint-transform sentinel -ddb --lr 1e-4
-
-## python main_lincls.py --pretrained checkpoints/moco_sat_resnet50_lr=0.00015_bs=512_joint=either/checkpoint_0077.pth.tar --pretrained_id joint=either --joint-transform rgb -ddb --lr 1e-4
-
-## python main_lincls.py --pretrained checkpoints/moco_sat_resnet50_lr=0.00015_bs=512_joint=either/checkpoint_0077.pth.tar --pretrained_id joint=either --joint-transform both -ddb --lr 1e-4
-
-#-----------
-
-## python main_lincls.py --pretrained checkpoints/rgb_moco_resnet50_lr=0.00015_bs=256_r=224_rc=224/checkpoint_0059.pth.tar --pretrained_id rgb-cs=224 --rgb-resize 224 --crop-size 224 --arch resnet50 -b 512
-
-## python main_lincls.py --pretrained checkpoints/rgb_moco_sat_resnet50_lr=0.00015_bs=512_r=224_rc=32/checkpoint_0058.pth.tar --pretrained_id rgb-cs=32 --rgb-resize 224 --crop-size 32 --arch sat_resnet50
-
-#------------
-
-# python main_lincls.py --arch sat_resnet50 --pretrained checkpoints/joint_moco_sat_resnet50_lr=0.00015_bs=512_rgb-r=50_sentinel-r=50_rc=32_joint=either_ddb/checkpoint_0099.pth.tar --pretrained_id joint=50-32-either-ddb --joint-transform rgb -ddb --rgb-resize 50
-
-# python main_lincls.py --arch sat_resnet50 --pretrained checkpoints/joint_moco_sat_resnet50_lr=0.00015_bs=512_rgb-r=50_sentinel-r=50_rc=32_joint=either_ddb/checkpoint_0099.pth.tar --pretrained_id joint=50-32-either-ddb --joint-transform sentinel -ddb --rgb-resize 50
-
-
