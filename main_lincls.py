@@ -106,7 +106,7 @@ parser.add_argument('--finetune', '-ft', action='store_true',
 
 ## augmentation configs
 parser.add_argument('--sentinel-resize', default=50, type=int)
-parser.add_argument('--rgb-resize', default=224, type=int)
+parser.add_argument('--rgb-resize', default=50, type=int)
 parser.add_argument('--crop-size', default=32, type=int)
 parser.add_argument('--joint-transform', default='sentinel', choices=['rgb', 'sentinel', 'both', 'drop'], type=str)
 
@@ -525,10 +525,10 @@ def main_worker(gpu, ngpus_per_node, args):
         logfile += f'_fs'
     if args.finetune:
         logfile += f'_ft'
-    if not os.path.exists(f'checkpoints/{logfile}/'):
-        os.makedirs(f'checkpoints/{logfile}/', exist_ok=True)
-    if not os.path.exists(f'runs/{logfile}'):
-        os.makedirs(f'runs/{logfile}/', exist_ok=True)
+    #if not os.path.exists(f'checkpoints/{logfile}/'):
+    #    os.makedirs(f'checkpoints/{logfile}/', exist_ok=True)
+    #if not os.path.exists(f'runs/{logfile}'):
+    #    os.makedirs(f'runs/{logfile}/', exist_ok=True)
         
     if not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank == 0):
         wandb.init(
@@ -553,13 +553,15 @@ def main_worker(gpu, ngpus_per_node, args):
         best_acc1 = max(acc1, best_acc1)
 
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank == 0): # only the first GPU saves checkpoint
-            save_checkpoint({
-                'epoch': epoch + 1,
-                'arch': args.arch,
-                'state_dict': model.state_dict(),
-                'best_acc1': best_acc1,
-                'optimizer' : optimizer.state_dict(),
-            }, is_best, filename=f'checkpoints/{logfile}/checkpoint_%04d.pth.tar' % epoch)
+            ## NOT SAVING NO MEMORY ON ATLAS
+            #if epoch % 10 == 0 or epoch == args.epochs - 1:
+                #save_checkpoint({
+                #    'epoch': epoch + 1,
+                #    'arch': args.arch,
+                #    'state_dict': model.state_dict(),
+                #    'best_acc1': best_acc1,
+                #    'optimizer' : optimizer.state_dict(),
+                #}, is_best, filename=f'checkpoints/{logfile}/checkpoint_%04d.pth.tar' % epoch)
             if args.pretrained and epoch == args.start_epoch and not (args.fully_supervised or args.finetune):
                 sanity_check(model.state_dict(), args.pretrained, linear_keyword)
             wandb.log({"training/loss": loss, "training/acc1": train_acc1, "training/acc5": train_acc5, "val/acc1": acc1, "val/acc5": acc5})
@@ -825,8 +827,12 @@ if __name__ == '__main__':
 
 #------------
 
-# python main_lincls.py --arch sat_resnet50 --pretrained checkpoints/joint_moco_sat_resnet50_lr=0.00015_bs=512_rgb-r=50_sentinel-r=50_rc=32_joint=either_ddb/checkpoint_0099.pth.tar --pretrained_id joint=50-32-either-ddb --joint-transform rgb -ddb --rgb-resize 50
+# python main_lincls.py --arch sat_resnet50 --pretrained checkpoints/joint_moco_sat_resnet50_lr=0.00015_bs=512_rgb-r=50_sentinel-r=50_rc=32_joint=either_ddb/checkpoint_0199.pth.tar --pretrained_id joint-200 --joint-transform rgb -ddb
 
-# python main_lincls.py --arch sat_resnet50 --pretrained checkpoints/joint_moco_sat_resnet50_lr=0.00015_bs=512_rgb-r=50_sentinel-r=50_rc=32_joint=either_ddb/checkpoint_0099.pth.tar --pretrained_id joint=50-32-either-ddb --joint-transform sentinel -ddb --rgb-resize 50
+# python main_lincls.py --arch sat_resnet50 --pretrained checkpoints/joint_moco_sat_resnet50_lr=0.00015_bs=512_rgb-r=50_sentinel-r=50_rc=32_joint=either_ddb/checkpoint_0199.pth.tar --pretrained_id joint-200 --joint-transform rgb -ddb --rgb-resize 224 --crop-size 224
+
+# python main_lincls.py --arch sat_resnet50 --pretrained checkpoints/joint_moco_sat_resnet50_lr=0.00015_bs=512_rgb-r=50_sentinel-r=50_rc=32_joint=either_ddb/checkpoint_0199.pth.tar --pretrained_id joint-200 --joint-transform sentinel -ddb
+
+# python main_lincls.py --arch sat_resnet50 --pretrained checkpoints/joint_moco_sat_resnet50_lr=0.00015_bs=512_rgb-r=50_sentinel-r=50_rc=32_joint=either_ddb/checkpoint_0199.pth.tar --pretrained_id joint-200 --joint-transform both -ddb
 
 

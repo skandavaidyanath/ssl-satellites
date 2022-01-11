@@ -52,7 +52,7 @@ parser.add_argument('--epochs', default=100, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-parser.add_argument('-b', '--batch-size', default=1024, type=int,
+parser.add_argument('-b', '--batch-size', default=256, type=int,
                     metavar='N',
                     help='mini-batch size (default: 256), this is the total '
                          'batch size of all GPUs on the current node when '
@@ -89,8 +89,8 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'multi node data parallel training')
 parser.add_argument('--cos', action='store_true', help='use cosine lr schedule')
 
-parser.add_argument('--pretrained', default='checkpoints/joint_moco_sat_resnet50_lr=0.00015_bs=512_rgb-r=50_sentinel-r=50_rc=32_joint=either_ddb/checkpoint_0099.pth.tar', type=str, help='path to moco pretrained checkpoint')
-parser.add_argument('--pretrained-id', default='joint-100', type=str, help='Pretrained ID')
+parser.add_argument('--pretrained', default='checkpoints/joint_moco_sat_resnet50_lr=0.00015_bs=512_rgb-r=50_sentinel-r=50_rc=32_joint=either_ddb/checkpoint_0199.pth.tar', type=str, help='path to moco pretrained checkpoint')
+parser.add_argument('--pretrained-id', default='joint-200', type=str, help='Pretrained ID')
 parser.add_argument('--eval_model', default='', type=str, help='path to eval model')
 parser.add_argument('--fully-supervised', '-fs', action='store_true',
                     help='train a fully supervised model from scratch')
@@ -409,10 +409,10 @@ def main_worker(gpu, ngpus_per_node, args):
         logfile += f'_fs'
     if args.finetune:
         logfile += f'_ft'
-    if not os.path.exists(f'checkpoints/{logfile}/'):
-        os.makedirs(f'checkpoints/{logfile}/', exist_ok=True)
-    if not os.path.exists(f'runs/{logfile}'):
-        os.makedirs(f'runs/{logfile}/', exist_ok=True)
+    #if not os.path.exists(f'checkpoints/{logfile}/'):
+    #    os.makedirs(f'checkpoints/{logfile}/', exist_ok=True)
+    #if not os.path.exists(f'runs/{logfile}'):
+    #    os.makedirs(f'runs/{logfile}/', exist_ok=True)
         
     if not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank == 0):
         wandb.init(
@@ -437,14 +437,15 @@ def main_worker(gpu, ngpus_per_node, args):
         best_acc1 = max(acc1, best_acc1)
 
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank == 0):
-            if epoch % 10 == 0 or epoch == args.epochs - 1:
-                save_checkpoint({
-                    'epoch': epoch + 1,
-                    'arch': args.arch,
-                    'state_dict': model.state_dict(),
-                    'best_acc1': best_acc1,
-                    'optimizer': optimizer.state_dict(),
-                }, is_best, filename=f'checkpoints/{logfile}/checkpoint_%04d.pth.tar' % epoch)
+            ## NOT SAVING NO MEMORY ON ATLAS
+            #if epoch % 10 == 0 or epoch == args.epochs - 1:
+            #    save_checkpoint({
+            #        'epoch': epoch + 1,
+            #        'arch': args.arch,
+            #        'state_dict': model.state_dict(),
+            #        'best_acc1': best_acc1,
+            #        'optimizer': optimizer.state_dict(),
+            #    }, is_best, filename=f'checkpoints/{logfile}/checkpoint_%04d.pth.tar' % epoch)
             if args.pretrained and epoch == args.start_epoch and not (args.fully_supervised or args.finetune):
                 sanity_check(model.state_dict(), args.pretrained, linear_keyword)
             wandb.log({"training/loss": loss, "training/acc1": train_acc1, "training/acc5": train_acc5, "val/acc1": acc1, "val/acc5": acc5})

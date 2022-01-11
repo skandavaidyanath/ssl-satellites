@@ -28,6 +28,10 @@ print('CUDA available: {}'.format(torch.cuda.is_available()))
 
 ## CODEBASE CHANGES:
 ## 1) Line 371 xview_dataset.py -- don't pad unnecessarily. want to maintain 32x32
+## 2) Retinanet and Anchors changes for sat_resnet50 (within if) - line 164 retinanet.py and line 12 anchors.py
+
+## TODO:
+## 1) Might want to change optimizer to have different lr for different parts of model like main_semseg.py
 
 def main(args=None):
     parser = argparse.ArgumentParser(description='Simple training script for training a RetinaNet network.')
@@ -39,15 +43,15 @@ def main(args=None):
     parser.add_argument('--csv_val', default='/atlas/u/kayush/winter2020/jigsaw/pytorch-retinanet/retinanet/val_annots.csv', help='Path to file containing validation annotations (optional, see readme)')
 
     parser.add_argument('--depth', help='Resnet depth, must be one of 18, 34, 50, 101, 152', type=int, default=50)
-    parser.add_argument('--epochs', help='Number of epochs', type=int, default=100)
+    parser.add_argument('--epochs', help='Number of epochs', type=int, default=200)
 
-    parser.add_argument('--pretrained', default='checkpoints/joint_moco_sat_resnet50_lr=0.00015_bs=512_rgb-r=50_sentinel-r=50_rc=32_joint=either_ddb/checkpoint_0099.pth.tar', type=str, help='path to moco pretrained checkpoint')
-    parser.add_argument('--pretrained-id', default='joint-100', type=str, help='Pretrained ID')
+    parser.add_argument('--pretrained', default='checkpoints/joint_moco_sat_resnet50_lr=0.00015_bs=512_rgb-r=50_sentinel-r=50_rc=32_joint=either_ddb/checkpoint_0199.pth.tar', type=str, help='path to moco pretrained checkpoint')
+    parser.add_argument('--pretrained-id', default='joint-200', type=str, help='Pretrained ID')
     parser.add_argument('--savepath', default='', type=str, help='Moco Augmentation Type')
     parser.add_argument('--sat_resnet', '-sr', action='store_true', help='Use smaller version of resnet?')
     parser.add_argument('--num_bands', default=16, type=int, help='Number of bands input in image')
     parser.add_argument('--batch-size', '-bs', default=1024, type=int, help='Batch size')
-    parser.add_argument('--lr', default=1e-3, type=float, help='Learning rate')
+    parser.add_argument('--lr', default=1e-5, type=float, help='Learning rate')
     parser.add_argument('--finetune', '-ft', action='store_true', help='finetune old weights')
     parser.add_argument('--min-side', type=int, default=32, help='min side to resize')
     parser.add_argument('--max-side', type=int, default=32, help='max side to resize')
@@ -62,17 +66,14 @@ def main(args=None):
     if parser.finetune:
         logfile += f'_ft'
     parser.savepath = f'checkpoints/{logfile}/'
-    if not os.path.exists(parser.savepath):
-        os.makedirs(parser.savepath, exist_ok=True)
+    #if not os.path.exists(parser.savepath):
+    #    os.makedirs(parser.savepath, exist_ok=True)
 
     wandb.init(
         name=logfile,
         project='moco-v3',
         config=vars(parser),
         entity='ssl-satellites')
-
-    if not os.path.exists(parser.savepath):
-        os.makedirs(parser.savepath, exist_ok=True)
 
     # Create the data loaders
     if parser.dataset == 'coco':
@@ -138,7 +139,6 @@ def main(args=None):
                 param.requires_grad = False
             
     print('==> Model ready!')
-
 
     #####
     # create model
@@ -279,8 +279,9 @@ def main(args=None):
             
         scheduler.step(np.mean(epoch_loss))
         
-        filename = parser.savepath + '/train_epoch_' + str(epoch_num) + '.pth'
-        torch.save({'epoch': epoch_num, 'state_dict': retinanet.state_dict(), 'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict()}, filename)
+        ## NOT SAVING NO MEMORY ON ATLAS
+        #filename = parser.savepath + '/train_epoch_' + str(epoch_num) + '.pth'
+        #torch.save({'epoch': epoch_num, 'state_dict': retinanet.state_dict(), 'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict()}, filename)
 
     retinanet.eval()
 

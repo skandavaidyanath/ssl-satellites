@@ -451,13 +451,14 @@ def main_worker(gpu, ngpus_per_node, args):
 
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                 and args.rank == 0): # only the first GPU saves checkpoint
-            save_checkpoint({
-                'epoch': epoch + 1,
-                'arch': args.arch,
-                'state_dict': model.state_dict(),
-                'optimizer' : optimizer.state_dict(),
-                'scaler': scaler.state_dict(),
-            }, is_best=False, filename=f'checkpoints/{logfile}/checkpoint_%04d.pth.tar' % epoch)
+            if (epoch+1) % 10 == 0 or epoch == args.epochs-1:
+                save_checkpoint({
+                    'epoch': epoch + 1,
+                    'arch': args.arch,
+                    'state_dict': model.state_dict(),
+                    'optimizer' : optimizer.state_dict(),
+                    'scaler': scaler.state_dict(),
+                }, is_best=False, filename=f'checkpoints/{logfile}/checkpoint_%04d.pth.tar' % epoch)
 
 
 def train(train_loader, model, optimizer, scaler, epoch, args):

@@ -161,9 +161,9 @@ def main_worker(gpu, ngpus_per_node, argss):
             logfile += f'_fs'
         if args.finetune:
             logfile += f'_ft'
-        args.save_path = f'checkpoints/{logfile}/'
-        if not os.path.exists(args.save_path):
-            os.makedirs(args.save_path, exist_ok=True)
+        #args.save_path = f'checkpoints/{logfile}/'
+        #if not os.path.exists(args.save_path):
+        #    os.makedirs(args.save_path, exist_ok=True)
             
         wandb.init(
             name=logfile,
@@ -274,14 +274,15 @@ def main_worker(gpu, ngpus_per_node, argss):
                 'training/mAcc': mAcc_train,
                 'training/allAcc': allAcc_train
             })
-
-        if (epoch_log % args.save_freq == 0) and main_process():
-            filename = args.save_path + '/train_epoch_' + str(epoch_log) + '.pth'
-            logger.info('Saving checkpoint to: ' + filename)
-            torch.save({'epoch': epoch_log, 'state_dict': model.state_dict(), 'optimizer': optimizer.state_dict()}, filename)
-            if epoch_log / args.save_freq > 2:
-                deletename = args.save_path + '/train_epoch_' + str(epoch_log - args.save_freq * 2) + '.pth'
-                os.remove(deletename)
+        
+        ## NOT SAVING NO MEMORY ON ATLAS
+        #if (epoch_log % args.save_freq == 0) and main_process():
+            #filename = args.save_path + '/train_epoch_' + str(epoch_log) + '.pth'
+            #logger.info('Saving checkpoint to: ' + filename)
+            #torch.save({'epoch': epoch_log, 'state_dict': model.state_dict(), 'optimizer': optimizer.state_dict()}, filename)
+            #if epoch_log / args.save_freq > 2:
+            #    deletename = args.save_path + '/train_epoch_' + str(epoch_log - args.save_freq * 2) + '.pth'
+            #    os.remove(deletename)
         if args.evaluate:
             loss_val, mIoU_val, mAcc_val, allAcc_val = validate(val_loader, model, criterion)
             if main_process():

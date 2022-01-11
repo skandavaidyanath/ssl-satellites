@@ -41,10 +41,10 @@ TRAIN:
   print_freq: 10
   save_freq: 5
   save_path: ## to be set in code
-  pretrained: checkpoints/joint_moco_sat_resnet50_lr=0.00015_bs=512_rgb-r=50_sentinel-r=50_rc=32_joint=either_ddb/checkpoint_0099.pth.tar # path to initial weight (default: none)
-  pretrained_id: joint-100
+  pretrained: checkpoints/joint_moco_sat_resnet50_lr=0.00015_bs=512_rgb-r=50_sentinel-r=50_rc=32_joint=either_ddb/checkpoint_0199.pth.tar # path to initial weight (default: none)
+  pretrained_id: joint-200
   fully_supervised: False
-  finetune: False
+  finetune: True
   resume:  # path to latest checkpoint (default: none)
   evaluate: True  # evaluate on validation set, extra gpu memory needed and small batch_size_val is recommend
 Distributed:
